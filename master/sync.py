@@ -264,6 +264,15 @@ WantedBy=multi-user.target
 """
 
 
+def _push_all_worker_py(ssh) -> int:
+    """把 worker/ 下所有 .py 文件推到 worker:/opt/twitter-worker/。返回推了几个。"""
+    n = 0
+    for f in sorted(WORKER_LOCAL_DIR.glob("*.py")):
+        ssh.put_file(f, f"{WORKER_REMOTE_DIR}/{f.name}")
+        n += 1
+    return n
+
+
 def provision_worker(
     worker: dict,
     on_progress: Optional[Callable[[str], None]] = None,
@@ -287,8 +296,8 @@ def provision_worker(
                 return False, f"环境准备失败 (rc={rc}):\n{out[-2000:]}"
 
             report("推送 worker 代码...")
-            for f in ("worker.py", "tweet_engine.py", "popup_handler.py", "traffic.py"):
-                ssh.put_file(WORKER_LOCAL_DIR / f, f"{WORKER_REMOTE_DIR}/{f}")
+            n = _push_all_worker_py(ssh)
+            report(f"已推送 {n} 个 .py 文件")
 
             report("写入 config.json + 空 tasks.json...")
             payload = _build_config_payload(worker)
@@ -319,10 +328,9 @@ def update_worker_code(worker: dict) -> tuple[bool, str]:
     """只推代码 + 重启服务,不重装环境。"""
     try:
         with SSHClient(**_creds(worker)) as ssh:
-            for f in ("worker.py", "tweet_engine.py", "popup_handler.py", "traffic.py"):
-                ssh.put_file(WORKER_LOCAL_DIR / f, f"{WORKER_REMOTE_DIR}/{f}")
+            n = _push_all_worker_py(ssh)
             ssh.exec("systemctl restart twitter-worker")
-        return True, "已更新代码并重启"
+        return True, f"已更新 {n} 个 .py 文件并重启"
     except Exception as e:
         return False, str(e)
 
