@@ -24,6 +24,7 @@ from pathlib import Path
 import popup_handler as pop
 import tweet_engine as eng
 import traffic
+import socks_relay
 
 
 WORK_DIR = Path("/opt/twitter-worker")
@@ -105,20 +106,28 @@ def update_task_in_file(task_id: int, **fields):
 
 
 def proxy_dicts(config) -> tuple:
+    """通过本地 SOCKS5 中继间接走带认证的住宅代理。
+    chromium 不支持带认证的 socks5,所以走 gost 中继。
+    """
     p = config.get("proxy") or {}
     if not p.get("host"):
         return None, None
-    pw = {"server": f"socks5://{p['host']}:{p['port']}"}
-    if p.get("username"):
-        pw["username"] = p["username"]
-    if p.get("password"):
-        pw["password"] = p["password"]
 
-    auth = ""
-    if p.get("username"):
-        auth = f"{p['username']}:{p.get('password','')}@"
-    yt = f"socks5://{auth}{p['host']}:{p['port']}"
-    return pw, yt
+    if not socks_relay.ensure_relay(p, log):
+        log("中继启动失败,直接尝试用住宅代理(chromium 可能因为不支持 socks5 auth 失败)")
+        # 退回直连
+        pw = {"server": f"socks5://{p['host']}:{p['port']}"}
+        if p.get("username"):
+            pw["username"] = p["username"]
+        if p.get("password"):
+            pw["password"] = p["password"]
+        auth = ""
+        if p.get("username"):
+            auth = f"{p['username']}:{p.get('password','')}@"
+        yt = f"socks5://{auth}{p['host']}:{p['port']}"
+        return pw, yt
+
+    return socks_relay.local_chromium_proxy(), socks_relay.local_ytdlp_proxy_url()
 
 
 def pick_next_task(tasks):

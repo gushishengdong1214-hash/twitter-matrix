@@ -107,8 +107,10 @@ def download_video(
         sniffed = _sniff_m3u8(url, pw_proxy, user_agent, log)
         if sniffed:
             real_url = sniffed
+            log(f"嗅探到 m3u8: {sniffed[:60]}...")
         else:
-            log("嗅探失败,直接尝试原 URL")
+            log("嗅探失败 — yt-dlp 会拒绝 jable.tv 原 URL,直接报错")
+            return False
 
     if out_path.exists():
         out_path.unlink()

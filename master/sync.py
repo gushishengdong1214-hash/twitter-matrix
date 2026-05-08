@@ -223,6 +223,16 @@ apt-get install -y python3 python3-pip python3-venv vnstat ffmpeg curl wget
 systemctl enable vnstat || true
 systemctl start vnstat || true
 
+# 装 gost(SOCKS5 中继,因为 chromium 不支持带认证的 socks5)
+if [ ! -f /usr/local/bin/gost ]; then
+    cd /tmp
+    GOST_URL="https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz"
+    wget -q "$GOST_URL" -O gost.gz
+    gunzip -f gost.gz
+    mv gost /usr/local/bin/gost
+    chmod +x /usr/local/bin/gost
+fi
+
 mkdir -p /opt/twitter-worker /opt/twitter-worker/screenshots
 
 if [ ! -d /opt/twitter-worker/venv ]; then
