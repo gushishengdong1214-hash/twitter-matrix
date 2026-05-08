@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+master/venv/
+master/data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+worker/venv/
+worker/__pycache__/
+
+*.log
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# 别意外把视频/截图传上去
+*.mp4
+*.png
+!master/static/**/*.png
