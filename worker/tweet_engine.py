@@ -197,7 +197,7 @@ def post_to_twitter(
                 page.goto("https://x.com/compose/tweet", timeout=60_000)
                 page.wait_for_timeout(2000)
 
-            pop.sweep_known_popups(page, log)
+            pop.dismiss_all_overlays(page, log)
 
             try:
                 page.wait_for_selector(
@@ -209,15 +209,22 @@ def post_to_twitter(
                     "找不到 tweetTextarea_0(可能未登录、2FA、或弹窗挡住)", shot, html
                 )
 
-            pop.type_caption_with_mentions(
-                page, "[data-testid='tweetTextarea_0']", caption, log
-            )
+            try:
+                pop.type_caption_with_mentions(
+                    page, "[data-testid='tweetTextarea_0']", caption, log
+                )
+            except Exception as e:
+                shot, html = pop.snapshot_unknown(page, screenshot_dir, "type_caption_fail")
+                raise pop.UnknownPopupError(
+                    f"输入文案失败,可能有未识别的浮层挡住:{e}", shot, html,
+                )
             log("文案输入完成")
 
+            pop.dismiss_all_overlays(page, log)
             page.locator("input[data-testid='fileInput']").first.set_input_files(str(video_path))
             log(f"已选择视频文件 {video_path}, 等待 X 处理...")
 
-            pop.sweep_known_popups(page, log)
+            pop.dismiss_all_overlays(page, log)
 
             try:
                 page.wait_for_selector(
@@ -226,7 +233,7 @@ def post_to_twitter(
                 )
                 log("发送按钮已激活")
             except Exception:
-                pop.sweep_known_popups(page, log)
+                pop.dismiss_all_overlays(page, log)
                 btn = page.locator("[data-testid='tweetButton']").first
                 disabled = True
                 try:
@@ -245,7 +252,7 @@ def post_to_twitter(
             page.locator("[data-testid='tweetButton']").first.click()
             log("已点击发送")
             page.wait_for_timeout(8_000)
-            pop.sweep_known_popups(page, log)
+            pop.dismiss_all_overlays(page, log)
             page.wait_for_timeout(5_000)
             log("发推完成")
         finally:

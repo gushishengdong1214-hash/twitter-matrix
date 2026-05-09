@@ -42,18 +42,6 @@ KNOWN_POPUPS: list[PopupRule] = [
         description="通用确认弹窗(敏感内容、首次发推等)",
     ),
     PopupRule(
-        name="sheet_dialog_close",
-        test_selector="[data-testid='app-bar-close']",
-        click_selector="[data-testid='app-bar-close']",
-        description="顶部 sheet 类弹窗的关闭按钮",
-    ),
-    PopupRule(
-        name="x_premium_upsell",
-        test_selector="[aria-label='Close'][role='button']",
-        click_selector="[aria-label='Close'][role='button']",
-        description="Premium 订阅引导覆盖层",
-    ),
-    PopupRule(
         name="enable_notifications",
         test_selector="text=Enable notifications",
         press_key="Escape",
@@ -79,6 +67,28 @@ def sweep_known_popups(page, log) -> int:
         except Exception:
             continue
     return handled
+
+
+def dismiss_all_overlays(page, log, max_rounds: int = 3) -> int:
+    """
+    主动清场:循环按 Escape + 扫已知规则,直到 #layers 没有非空子元素 或 跑满 max_rounds 次。
+    返回:总共清掉几个浮层。
+    """
+    cleared = 0
+    for _ in range(max_rounds):
+        cleared += sweep_known_popups(page, log)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+        try:
+            n = page.locator("#layers > div:not(:empty)").count()
+            if n == 0:
+                return cleared
+        except Exception:
+            return cleared
+    return cleared
 
 
 def snapshot_unknown(page, screenshot_dir: Path, prefix: str = "popup") -> tuple[str, str]:
@@ -134,7 +144,11 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
     其余文字用 keyboard.type(快但不至于一次 fill 跳过事件)。
     """
     target = page.locator(textarea_selector).first
-    target.click()
+    try:
+        target.click(timeout=10_000)
+    except Exception as e:
+        log(f"普通点击 textarea 失败:{e}; 强制 click")
+        target.click(force=True, timeout=5_000)
     page.wait_for_timeout(200)
 
     segments = parse_caption_for_mentions(caption)
@@ -142,7 +156,10 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
         target.fill(caption)
         return
 
-    target.click()
+    try:
+        target.click(timeout=5_000)
+    except Exception:
+        target.click(force=True)
     for kind, value in segments:
         if kind == "text":
             page.keyboard.type(value, delay=20)
