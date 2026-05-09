@@ -106,15 +106,20 @@ def parse_caption_for_mentions(caption: str) -> list[tuple[str, str]]:
     把 caption 拆成 [(kind, value), ...]。
     kind: "text" | "mention"
     例:"看 @alice 的视频 #hot" -> [("text","看 "), ("mention","alice"), ("text"," 的视频 #hot")]
+    边界判定:@ 前面只有 ASCII 字母数字下划线才算"邮箱地址延续"(不触发 mention)。
+    中文 / 标点 / 空格 / 行首,都算合法 mention 起点。
     """
+    def _is_ident_continuation(c: str) -> bool:
+        return c.isascii() and (c.isalnum() or c == "_")
+
     segments: list[tuple[str, str]] = []
     i, n = 0, len(caption)
     buf = ""
     while i < n:
         ch = caption[i]
-        if ch == "@" and (i == 0 or not caption[i - 1].isalnum()):
+        if ch == "@" and (i == 0 or not _is_ident_continuation(caption[i - 1])):
             j = i + 1
-            while j < n and (caption[j].isalnum() or caption[j] == "_"):
+            while j < n and _is_ident_continuation(caption[j]):
                 j += 1
             handle = caption[i + 1:j]
             if handle:
@@ -133,8 +138,10 @@ def parse_caption_for_mentions(caption: str) -> list[tuple[str, str]]:
 
 def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
     """
-    分段输入 caption。@xxx 用 keyboard.type 触发 listbox,选匹配项;
-    其余文字用 keyboard.type(快但不至于一次 fill 跳过事件)。
+    分段输入 caption,处理:
+    - 多行(\n → Shift+Enter 让 X textarea 换行)
+    - @xxx → 触发 typeahead → 选第一项(变蓝色 mention)
+    - 普通文字 → keyboard.type
     """
     target = page.locator(textarea_selector).first
 
@@ -147,7 +154,6 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
                 target.click(force=True, timeout=4_000)
                 return True
             except Exception:
-                # 最后兜底:JS focus(绕过浮层拦截)
                 try:
                     page.evaluate(
                         "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
@@ -155,38 +161,38 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
                     )
                     return True
                 except Exception as e:
-                    log(f"JS focus 也失败:{e}")
+                    log(f"JS focus 失败:{e}")
                     return False
 
     if not _focus():
         raise RuntimeError("无法 focus tweetTextarea_0")
     page.wait_for_timeout(300)
 
-    segments = parse_caption_for_mentions(caption)
-    if not any(s[0] == "mention" for s in segments):
-        try:
-            target.fill(caption)
-        except Exception:
-            page.keyboard.type(caption, delay=15)
-        return
+    lines = caption.split("\n")
+    for line_idx, line in enumerate(lines):
+        if line_idx > 0:
+            # X 的 contenteditable textarea 用 Shift+Enter 换行
+            page.keyboard.press("Shift+Enter")
+            page.wait_for_timeout(80)
 
-    _focus()
-    for kind, value in segments:
-        if kind == "text":
-            page.keyboard.type(value, delay=20)
-        else:
-            page.keyboard.type(f"@{value}", delay=80)
-            try:
-                page.wait_for_selector("[role='listbox']", timeout=4000)
-                option = page.locator(
-                    f"[role='listbox'] [role='option'] >> text=/^{value}$/i"
-                ).first
-                if option.is_visible(timeout=1500):
-                    option.click()
-                else:
-                    page.keyboard.press("ArrowDown")
-                    page.keyboard.press("Enter")
-                log(f"已 @{value}")
-            except Exception:
-                log(f"@{value} 没等到 listbox,作为纯文本提交")
-                page.keyboard.type(" ")
+        segments = parse_caption_for_mentions(line)
+        for kind, value in segments:
+            if kind == "text":
+                page.keyboard.type(value, delay=15)
+            else:
+                page.keyboard.type(f"@{value}", delay=60)
+                # 等 X 弹 typeahead 然后选第一项(变蓝色 mention)
+                try:
+                    page.wait_for_selector("[role='listbox']", timeout=3000)
+                    option = page.locator(
+                        f"[role='listbox'] [role='option'] >> text=/^{value}$/i"
+                    ).first
+                    if option.is_visible(timeout=1500):
+                        option.click()
+                    else:
+                        page.keyboard.press("ArrowDown")
+                        page.keyboard.press("Enter")
+                    log(f"已 @{value}")
+                except Exception:
+                    log(f"@{value} 没等到 typeahead,作为纯文本提交")
+    page.wait_for_timeout(300)

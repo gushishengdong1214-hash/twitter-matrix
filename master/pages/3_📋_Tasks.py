@@ -7,7 +7,25 @@ import database as db
 
 st.set_page_config(page_title="任务录入", page_icon="📋", layout="wide")
 st.title("📋 任务录入")
-st.caption("一行一个任务,格式:`视频URL====文案`(用 4 个等号分隔,与现有脚本一致)")
+st.caption(
+    "一行一个任务。基本格式:`视频URL====文案`。需要 @ 别人时,用 `|` 表示换行,@ 各占一行。"
+)
+with st.expander("📖 格式示例(点开看)", expanded=False):
+    st.code(
+        """\
+# 普通任务
+https://jable.tv/aaa====今天分享这个,挺好的
+
+# 同一条带 2 个 @,| 表示换行
+https://jable.tv/bbb====聊聊这个|@elonmusk|@x
+
+# 带 3 个 @
+https://jable.tv/ccc====推荐|@friend1|@friend2|@friend3
+""",
+        language=None,
+    )
+    st.caption("第二条发到 X 上呈现:")
+    st.code("聊聊这个\n@elonmusk\n@x", language=None)
 
 workers = db.list_workers()
 if not workers:
@@ -24,16 +42,16 @@ worker_id = st.selectbox(
 )
 
 raw = st.text_area(
-    "批量录入",
+    "批量录入任务",
     height=320,
-    placeholder="https://jable.tv/xxx====这是文案1\nhttps://jable.tv/yyy====这是文案2",
+    placeholder="https://jable.tv/xxx====文案1\nhttps://jable.tv/yyy====文案2|@user1|@user2",
 )
 
 c1, c2 = st.columns([1, 4])
 with c1:
     submit = st.button("提交", type="primary")
 with c2:
-    st.caption("空行会自动跳过;格式错误的行会报错位置。")
+    st.caption("空行自动跳过;格式错误的行会标行号。")
 
 if submit:
     items, bad = [], []
@@ -49,13 +67,16 @@ if submit:
         if not url or not caption:
             bad.append(i)
             continue
-        items.append((url, caption))
+        # | 当行内换行符,每段是一行(文案 / @user1 / @user2 ...)
+        caption_lines = [seg.strip() for seg in caption.split("|") if seg.strip()]
+        caption_final = "\n".join(caption_lines)
+        items.append((url, caption_final))
 
     if bad:
         st.error(f"以下行格式错误:第 {bad} 行")
     if items:
         n = db.add_tasks_bulk(worker_id, items)
-        st.success(f"已录入 {n} 条任务。")
+        st.success(f"已录入 {n} 条任务")
         st.rerun()
 
 st.divider()
