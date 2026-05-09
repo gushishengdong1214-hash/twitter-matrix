@@ -224,50 +224,45 @@ def post_to_twitter(
             page.locator("input[data-testid='fileInput']").first.set_input_files(str(video_path))
             log(f"已选择视频文件 {video_path}")
 
-            # 等附件占位出现(X 接收文件,通常几秒)
+            # 等附件占位出现
             try:
                 page.wait_for_selector(
                     "[data-testid='attachments']", timeout=120_000
                 )
                 log("已附加视频(看到 attachments 容器)")
             except Exception:
-                log("没等到 attachments selector(可能 X 改了),继续")
+                log("没等到 attachments selector,继续")
 
-            # 等附件内出现 <video> 缩略图 或 删除按钮 → 视频已就绪
-            try:
-                page.wait_for_selector(
-                    "[data-testid='attachments'] video, "
-                    "[data-testid='attachments'] [aria-label*='Remove'], "
-                    "[data-testid='attachments'] [data-testid='removeMediaButton']",
-                    timeout=900_000,
-                )
-                log("视频已就绪(看到缩略图或可删按钮)")
-            except Exception:
-                log("没等到视频就绪标志,直接尝试发送")
-
-            # 给 X 一点 finalization 时间
-            page.wait_for_timeout(5_000)
             pop.dismiss_all_overlays(page, log)
 
-            # X 的 Post 按钮始终一个颜色,不依赖 aria-disabled,直接点
-            btn = page.locator(
-                "[data-testid='tweetButton'], [data-testid='tweetButtonInline']"
-            ).first
+            # 真正的等待:button 的 disabled 属性消失
+            # X 的发推按钮视觉上始终是黑色,但 DOM 里 disabled 真实存在,
+            # disabled 阻止 React 处理 onClick,即使 force click 也不会触发后端。
+            # 必须等 X 后台处理完视频(disabled 消失)才能 click。
+            log("等待 X 后台处理视频(等按钮 disabled 消失,最多 30 分钟)...")
             try:
-                btn.click(timeout=10_000)
-                log("已点击发送(普通 click)")
-            except Exception as e:
-                log(f"普通 click 失败:{e}; 尝试 force click")
-                try:
-                    btn.click(force=True, timeout=5_000)
-                    log("已点击发送(force click)")
-                except Exception as e2:
-                    shot, html = pop.snapshot_unknown(
-                        page, screenshot_dir, "click_post_failed"
-                    )
-                    raise pop.UnknownPopupError(
-                        f"无法点击发送按钮:{e2}", shot, html
-                    )
+                page.wait_for_selector(
+                    "[data-testid='tweetButton']:not([disabled]), "
+                    "[data-testid='tweetButtonInline']:not([disabled])",
+                    timeout=1800_000,  # 30 分钟
+                )
+                log("按钮 enabled,X 准备好发送")
+            except Exception:
+                pop.dismiss_all_overlays(page, log)
+                shot, html = pop.snapshot_unknown(
+                    page, screenshot_dir, "button_disabled_30min"
+                )
+                raise pop.UnknownPopupError(
+                    "30 分钟内 Post 按钮仍 disabled,X 可能在审核或拒绝该视频",
+                    shot, html,
+                )
+
+            page.wait_for_timeout(1_500)
+            page.locator(
+                "[data-testid='tweetButton']:not([disabled]), "
+                "[data-testid='tweetButtonInline']:not([disabled])"
+            ).first.click(timeout=10_000)
+            log("已点击发送")
 
             # 等推文真正发出去
             page.wait_for_timeout(8_000)
