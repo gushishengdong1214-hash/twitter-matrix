@@ -6,6 +6,8 @@
 
 plan_today_for_worker(worker) 会把当天还未跑的 scheduled 任务先回退到 pending,
 再从 pending 池里按 ID 顺序挑 daily_target 条排今日时间表。
+
+如果有任务在 running 状态超过 2 小时(通常是 worker 重启丢了),也回退到 pending。
 """
 
 import random
@@ -15,6 +17,7 @@ import database as db
 
 
 TASK_DURATION_ESTIMATE_MIN = 60
+STALE_RUNNING_HOURS = 2
 
 
 def _parse_hm(s: str) -> tuple[int, int]:
@@ -30,12 +33,23 @@ def plan_today_for_worker(worker: dict) -> int:
     if rest_max < rest_min:
         rest_max = rest_min
 
-    # 已 done / failed / human_required 不动;scheduled 回退;pending 不动
+    stale_cutoff = (datetime.now() - timedelta(hours=STALE_RUNNING_HOURS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     with db.get_conn() as c:
+        # scheduled 还没跑的全部回退
         c.execute(
             "UPDATE tasks SET status='pending', scheduled_at=NULL "
             "WHERE worker_id = ? AND status = 'scheduled'",
             (wid,),
+        )
+        # stale running:超过 N 小时还在 running 的,认为 worker 重启丢了
+        c.execute(
+            "UPDATE tasks SET status='pending', scheduled_at=NULL, started_at=NULL, "
+            "error_message='stale running, reset by scheduler' "
+            "WHERE worker_id = ? AND status = 'running' "
+            "AND (started_at IS NULL OR started_at < ?)",
+            (wid, stale_cutoff),
         )
 
     pending = db.list_tasks(worker_id=wid, status="pending", limit=target)

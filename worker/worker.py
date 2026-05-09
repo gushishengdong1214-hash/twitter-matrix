@@ -212,10 +212,26 @@ def run_one_task(task: dict, config: dict):
                 pass
 
 
+def reset_stale_running_tasks():
+    """启动时把 tasks.json 里 status=running 的任务回退为 scheduled。
+    防止 worker 重启时丢了正在跑的任务,导致后续永远不再调度它。"""
+    tasks = load_json(TASKS_FILE, [])
+    n = 0
+    for t in tasks:
+        if t.get("status") == "running":
+            t["status"] = "scheduled"
+            t["started_at"] = None
+            n += 1
+    if n:
+        save_json(TASKS_FILE, tasks)
+        log(f"启动时回退 {n} 个 stale running 任务为 scheduled")
+
+
 def main_loop():
     paused = False
     update_state(status="idle", current_task_id=None)
     log("Worker 启动")
+    reset_stale_running_tasks()
 
     while _running:
         cmd = consume_command()
