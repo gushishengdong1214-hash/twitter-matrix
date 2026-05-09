@@ -2,3 +2,4 @@ playwright>=1.40
 yt-dlp>=2024.04.09
 PySocks>=1.7
 pyotp>=2.9
+curl-cffi>=0.7

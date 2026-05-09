@@ -103,15 +103,19 @@ def download_video(
         log(f"已有完整视频 {out_path}, 跳过下载")
         return True
 
+    # 通用策略:先用浏览器嗅 m3u8(过 Cloudflare 等反爬),嗅到就用 m3u8 给 yt-dlp,
+    # 没嗅到再 fallback 给 yt-dlp 原 URL(yt-dlp 内置支持很多站)。
+    # jable.tv 特殊:嗅不到就直接放弃,因为 yt-dlp 会拒绝它的页面 URL。
     real_url = url
-    if "jable.tv" in url:
-        sniffed = _sniff_m3u8(url, pw_proxy, user_agent, log)
-        if sniffed:
-            real_url = sniffed
-            log(f"嗅探到 m3u8: {sniffed[:60]}...")
-        else:
-            log("嗅探失败 — yt-dlp 会拒绝 jable.tv 原 URL,直接报错")
-            return False
+    sniffed = _sniff_m3u8(url, pw_proxy, user_agent, log)
+    if sniffed:
+        real_url = sniffed
+        log(f"嗅探到 m3u8: {sniffed[:60]}...")
+    elif "jable.tv" in url:
+        log("jable.tv 嗅不到 m3u8,yt-dlp 会拒绝其页面,放弃")
+        return False
+    else:
+        log("未嗅到 m3u8,fallback 给 yt-dlp 直连原 URL")
 
     if out_path.exists():
         out_path.unlink()
@@ -128,6 +132,8 @@ def download_video(
             "User-Agent": user_agent,
             "Referer": url,
         },
+        # 让 yt-dlp 伪装真实浏览器 TLS 指纹,过 Cloudflare 等反爬(需要 curl-cffi)
+        "impersonate": "chrome",
     }
     if yt_proxy_url:
         ydl_opts["proxy"] = yt_proxy_url

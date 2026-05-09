@@ -247,7 +247,7 @@ if [ ! -d /opt/twitter-worker/venv ]; then
 fi
 
 /opt/twitter-worker/venv/bin/pip install --upgrade pip
-/opt/twitter-worker/venv/bin/pip install playwright yt-dlp PySocks pyotp
+/opt/twitter-worker/venv/bin/pip install playwright yt-dlp PySocks pyotp curl-cffi
 
 /opt/twitter-worker/venv/bin/playwright install chromium
 /opt/twitter-worker/venv/bin/playwright install-deps chromium
