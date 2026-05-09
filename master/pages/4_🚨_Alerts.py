@@ -33,7 +33,18 @@ else:
                     st.write(a["message"])
                 shot = a.get("screenshot_path")
                 if shot and Path(shot).exists():
-                    st.image(shot, caption="弹窗截图", width=720)
+                    st.image(shot, caption="弹窗截图(原尺寸)", use_container_width=True)
+                    try:
+                        with open(shot, "rb") as fh:
+                            st.download_button(
+                                "📥 下载原图",
+                                data=fh.read(),
+                                file_name=Path(shot).name,
+                                mime="image/png",
+                                key=f"dl_{a['id']}",
+                            )
+                    except Exception:
+                        pass
                 elif shot:
                     st.caption(f"截图未同步到中控:{shot}")
             with cols[1]:
