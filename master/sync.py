@@ -121,6 +121,33 @@ def pull_log_tail(worker: dict, lines: int = 200) -> str:
         return out
 
 
+def pull_log_incremental(worker: dict) -> tuple[str, int]:
+    """读 worker 日志的新增部分。返回 (新内容, 新 offset)。"""
+    last_offset = int(worker.get("last_log_offset") or 0)
+    with SSHClient(**_creds(worker)) as ssh:
+        rc, size_out, _ = ssh.exec(
+            f"wc -c < {WORKER_REMOTE_DIR}/log.txt 2>/dev/null || echo 0",
+            timeout=10,
+        )
+        try:
+            total = int(size_out.strip())
+        except ValueError:
+            total = 0
+
+        if total <= last_offset:
+            return "", last_offset
+
+        # 文件被截断 / 重置(总大小变小):从头开始读
+        if total < last_offset:
+            last_offset = 0
+
+        rc, content, _ = ssh.exec(
+            f"tail -c +{last_offset + 1} {WORKER_REMOTE_DIR}/log.txt",
+            timeout=30,
+        )
+        return content, total
+
+
 def pull_screenshots(worker: dict) -> list[Path]:
     """同步未下载的截图,返回新增的本地路径。"""
     SCREENSHOT_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -203,17 +230,18 @@ def sync_worker(worker: dict) -> dict:
     except Exception as e:
         db.add_log(worker["id"], None, "WARN", f"同步任务状态失败:{e}")
 
-    # 拉日志最后 200 行
+    # 增量拉日志,避免重复
     try:
-        tail = pull_log_tail(worker, lines=200)
-        if tail:
-            for line in tail.splitlines():
+        new_content, new_offset = pull_log_incremental(worker)
+        if new_content:
+            for line in new_content.splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 db.add_log(worker["id"], None, "INFO", line)
-    except Exception:
-        pass
+            db.update_worker(worker["id"], last_log_offset=new_offset)
+    except Exception as e:
+        db.add_log(worker["id"], None, "WARN", f"增量同步日志失败:{e}")
 
     return {"ok": True, "message": "synced"}
 

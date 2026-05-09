@@ -106,6 +106,7 @@ def _migrate(conn) -> None:
         ("locale", "TEXT DEFAULT 'en-US'"),
         ("account_password", "TEXT"),
         ("twofa_secret", "TEXT"),
+        ("last_log_offset", "INTEGER DEFAULT 0"),
     ]
     for col, typ in migrations:
         if col not in existing:
