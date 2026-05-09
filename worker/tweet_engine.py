@@ -1,6 +1,7 @@
 """下载 + 发推核心。基于单账号脚本改造,加 proxy / popup_handler / 异常驱动 / 浏览器指纹 / 2FA。"""
 
 import json
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -257,7 +258,10 @@ def post_to_twitter(
                     shot, html,
                 )
 
-            page.wait_for_timeout(1_500)
+            # 模拟人类反应延迟 5-15 秒(真人看到按钮亮起也会顿一下再点)
+            human_delay_ms = random.randint(5_000, 15_000)
+            log(f"模拟人类延迟 {human_delay_ms/1000:.1f} 秒后点发送")
+            page.wait_for_timeout(human_delay_ms)
             page.locator(
                 "[data-testid='tweetButton']:not([disabled]), "
                 "[data-testid='tweetButtonInline']:not([disabled])"
