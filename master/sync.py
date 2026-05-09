@@ -171,14 +171,21 @@ def sync_worker(worker: dict) -> dict:
             local_shot = ""
             if alert.get("screenshot"):
                 local_shot = str(SCREENSHOT_LOCAL_DIR / f"w{worker['id']}_{Path(alert['screenshot']).name}")
-            db.add_alert(
-                worker_id=worker["id"],
-                task_id=alert.get("task_id"),
-                type_="popup_unknown",
-                message=alert.get("message", ""),
-                screenshot_path=local_shot,
-                html_snapshot_path="",
-            )
+            # 同一 worker+task 的未解决告警只保留一条,避免每分钟同步导致 18 条重复
+            with db.get_conn() as c:
+                existed = c.execute(
+                    "SELECT id FROM alerts WHERE worker_id = ? AND task_id IS ? AND resolved = 0",
+                    (worker["id"], alert.get("task_id")),
+                ).fetchone()
+            if not existed:
+                db.add_alert(
+                    worker_id=worker["id"],
+                    task_id=alert.get("task_id"),
+                    type_="popup_unknown",
+                    message=alert.get("message", ""),
+                    screenshot_path=local_shot,
+                    html_snapshot_path="",
+                )
 
     # 同步任务状态变化
     try:

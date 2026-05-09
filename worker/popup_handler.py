@@ -71,23 +71,16 @@ def sweep_known_popups(page, log) -> int:
 
 def dismiss_all_overlays(page, log, max_rounds: int = 3) -> int:
     """
-    主动清场:循环按 Escape + 扫已知规则,直到 #layers 没有非空子元素 或 跑满 max_rounds 次。
-    返回:总共清掉几个浮层。
+    主动清场:循环 sweep 已知规则,每轮如果没关掉新的就停。
+    不按 Escape — 因为 X 的 compose 编辑器自己也会响应 Escape 而关掉。
     """
     cleared = 0
     for _ in range(max_rounds):
-        cleared += sweep_known_popups(page, log)
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-        page.wait_for_timeout(300)
-        try:
-            n = page.locator("#layers > div:not(:empty)").count()
-            if n == 0:
-                return cleared
-        except Exception:
-            return cleared
+        n = sweep_known_popups(page, log)
+        if n == 0:
+            break
+        cleared += n
+        page.wait_for_timeout(400)
     return cleared
 
 
@@ -144,22 +137,40 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
     其余文字用 keyboard.type(快但不至于一次 fill 跳过事件)。
     """
     target = page.locator(textarea_selector).first
-    try:
-        target.click(timeout=10_000)
-    except Exception as e:
-        log(f"普通点击 textarea 失败:{e}; 强制 click")
-        target.click(force=True, timeout=5_000)
-    page.wait_for_timeout(200)
+
+    def _focus():
+        try:
+            target.click(timeout=8_000)
+            return True
+        except Exception:
+            try:
+                target.click(force=True, timeout=4_000)
+                return True
+            except Exception:
+                # 最后兜底:JS focus(绕过浮层拦截)
+                try:
+                    page.evaluate(
+                        "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
+                        textarea_selector,
+                    )
+                    return True
+                except Exception as e:
+                    log(f"JS focus 也失败:{e}")
+                    return False
+
+    if not _focus():
+        raise RuntimeError("无法 focus tweetTextarea_0")
+    page.wait_for_timeout(300)
 
     segments = parse_caption_for_mentions(caption)
     if not any(s[0] == "mention" for s in segments):
-        target.fill(caption)
+        try:
+            target.fill(caption)
+        except Exception:
+            page.keyboard.type(caption, delay=15)
         return
 
-    try:
-        target.click(timeout=5_000)
-    except Exception:
-        target.click(force=True)
+    _focus()
     for kind, value in segments:
         if kind == "text":
             page.keyboard.type(value, delay=20)
