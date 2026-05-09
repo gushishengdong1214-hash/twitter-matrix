@@ -132,9 +132,14 @@ def download_video(
             "User-Agent": user_agent,
             "Referer": url,
         },
-        # 让 yt-dlp 伪装真实浏览器 TLS 指纹,过 Cloudflare 等反爬(需要 curl-cffi)
-        "impersonate": "chrome",
     }
+    # 只在 fallback(嗅不到 m3u8,直接下原 URL)时启用 impersonate 过 Cloudflare;
+    # 嗅到 m3u8 后下 segments 是无状态的,不需要 impersonate(且会因为版本名问题报错)
+    if real_url == url:
+        try:
+            ydl_opts["impersonate"] = "chrome-124"
+        except Exception:
+            pass
     if yt_proxy_url:
         ydl_opts["proxy"] = yt_proxy_url
 
