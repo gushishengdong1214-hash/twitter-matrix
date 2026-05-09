@@ -214,9 +214,7 @@ def post_to_twitter(
             )
             log("文案输入完成")
 
-            page.set_input_files(
-                "input[data-testid='fileInput']", str(video_path)
-            )
+            page.locator("input[data-testid='fileInput']").first.set_input_files(str(video_path))
             log(f"已选择视频文件 {video_path}, 等待 X 处理...")
 
             pop.sweep_known_popups(page, log)
@@ -244,7 +242,7 @@ def post_to_twitter(
                         shot, html,
                     )
 
-            page.click("[data-testid='tweetButton']")
+            page.locator("[data-testid='tweetButton']").first.click()
             log("已点击发送")
             page.wait_for_timeout(8_000)
             pop.sweep_known_popups(page, log)

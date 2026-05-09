@@ -133,14 +133,16 @@ def type_caption_with_mentions(page, textarea_selector: str, caption: str, log):
     分段输入 caption。@xxx 用 keyboard.type 触发 listbox,选匹配项;
     其余文字用 keyboard.type(快但不至于一次 fill 跳过事件)。
     """
-    page.locator(textarea_selector).click()
+    target = page.locator(textarea_selector).first
+    target.click()
     page.wait_for_timeout(200)
 
     segments = parse_caption_for_mentions(caption)
     if not any(s[0] == "mention" for s in segments):
-        page.locator(textarea_selector).fill(caption)
+        target.fill(caption)
         return
 
+    target.click()
     for kind, value in segments:
         if kind == "text":
             page.keyboard.type(value, delay=20)
