@@ -17,9 +17,9 @@ LIST_URLS = [
     "https://hanime1.me/search?sort=%E6%9C%80%E8%BF%91%E6%9B%B4%E6%96%B0",
 ]
 
-# 匹配 /watch?v=数字 的链接,并尽量抓附近的信息
+# 匹配 watch?v=数字 的链接(hanime1用完整URL: https://hanime1.me/watch?v=xxx)
 _WATCH_RE = re.compile(
-    r'<a\s+[^>]*href="(/watch\?v=\d+)"[^>]*>(.*?)</a>',
+    r'<a\s+[^>]*href="(https://hanime1\.me/watch\?v=\d+)"[^>]*>(.*?)</a>',
     re.S | re.I,
 )
 # 从一段 HTML 片段里找 img 的 src / alt
