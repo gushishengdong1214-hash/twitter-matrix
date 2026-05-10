@@ -1,9 +1,4 @@
-"""jable.tv 视频采集器。
-
-策略:逐个匹配 <a href=".../videos/..."> 的精确位置,
-缩略图和标题只在 <a> 开始后 500 字符内的 <img> 里找,
-避免和页面其他区域的 img 混淆。
-"""
+"""jable.tv 视频采集器 — BeautifulSoup 版。"""
 import re
 from urllib.parse import urljoin
 
@@ -12,6 +7,11 @@ try:
 except Exception:
     curl_requests = None
 
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
+
 BASE_URL = "https://jable.tv"
 LIST_URLS = [
     "https://jable.tv/latest-updates/",
@@ -19,23 +19,18 @@ LIST_URLS = [
     "https://jable.tv/categories/uncensored/",
 ]
 
-_A_RE = re.compile(
-    r'<a\s+[^>]*href="([^"]*videos/[^"]*)"[^>]*>',
-    re.S | re.I,
-)
-
 
 def crawl(limit: int = 10) -> list[dict]:
-    """返回视频列表,每项包含 url / title / thumbnail_url / site。"""
     if curl_requests is None:
         raise RuntimeError("curl_cffi 未安装")
+    if BeautifulSoup is None:
+        raise RuntimeError("beautifulsoup4 未安装")
 
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
 
@@ -55,45 +50,55 @@ def crawl(limit: int = 10) -> list[dict]:
             except Exception:
                 break
 
-            html = resp.text
+            soup = BeautifulSoup(resp.text, "html.parser")
             found_on_page = 0
 
-            for m in _A_RE.finditer(html):
+            for a in soup.find_all("a", href=re.compile(r"/videos/[^/]+")):
                 if len(results) >= limit:
                     break
-                href = m.group(1)
+                href = a.get("href", "")
+                if not href:
+                    continue
                 full_url = urljoin(BASE_URL, href)
 
-                # 过滤:确保是视频页面链接
-                if not re.search(r'/videos/[^/]+', full_url):
-                    continue
-                if any(k in full_url.lower() for k in ['categories', 'tags', 'actors', 'series']):
+                # 过滤非视频链接
+                if any(k in full_url.lower() for k in ["categories", "tags", "actors", "series"]):
                     continue
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
 
-                # --- 缩略图和标题:只在 <a> 开始后 500 字符内的 <img> 里找 ---
+                # 缩略图
                 thumb = ""
+                img = a.find("img")
+                if img:
+                    thumb = img.get("src") or img.get("data-src") or ""
+
+                # 标题: 优先 img alt, 其次 a title, 再次 a 的文本, 最后附近 h6/div
                 title = ""
-                inner_area = html[m.end():m.end() + 500]
+                if img and img.get("alt"):
+                    title = img.get("alt").strip()
+                if not title and a.get("title"):
+                    title = a.get("title").strip()
+                if not title:
+                    txt = a.get_text(strip=True)
+                    if txt and len(txt) > 1:
+                        title = txt
+                # 兜底: 在父元素里找标题
+                if not title:
+                    for parent in [a.find_parent(), a.find_parent().find_parent()]:
+                        if not parent:
+                            continue
+                        for sel in [".title", ".video-title", "h6", "h5", "h3"]:
+                            el = parent.select_one(sel)
+                            if el:
+                                t = el.get_text(strip=True)
+                                if t and len(t) > 1:
+                                    title = t
+                                    break
+                        if title:
+                            break
 
-                mm = re.search(r'<img[^>]*src="([^"]*)"[^>]*>', inner_area, re.S | re.I)
-                if mm:
-                    thumb = mm.group(1).strip()
-                if not thumb:
-                    mm = re.search(r'<img[^>]*data-src="([^"]*)"[^>]*>', inner_area, re.S | re.I)
-                    if mm:
-                        thumb = mm.group(1).strip()
-
-                mm = re.search(r'alt="([^"]*)"', inner_area, re.S | re.I)
-                if mm:
-                    t = mm.group(1).strip()
-                    if len(t) > 1:
-                        title = t
-
-                if thumb and not thumb.startswith("http"):
-                    thumb = urljoin(BASE_URL, thumb)
                 if not title:
                     title = "(无标题)"
 

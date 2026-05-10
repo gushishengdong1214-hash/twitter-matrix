@@ -1,10 +1,4 @@
-"""hanime1.me 视频采集器。
-
-策略:逐个匹配 <a href="https://hanime1.me/watch?v=xxx"> 的精确位置,
-缩略图只在 <a> 开始后 500 字符内的 <img> 里找,
-标题只在 <a> 开始前 500 字符内的 <div title> 里找,
-避免和页面其他区域的 img/div 混淆。
-"""
+"""hanime1.me 视频采集器 — BeautifulSoup 版。"""
 import re
 from urllib.parse import urljoin
 
@@ -13,29 +7,29 @@ try:
 except Exception:
     curl_requests = None
 
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
+
 BASE_URL = "https://hanime1.me"
 LIST_URLS = [
     "https://hanime1.me/",
     "https://hanime1.me/search?sort=%E6%9C%80%E8%BF%91%E6%9B%B4%E6%96%B0",
 ]
 
-_A_RE = re.compile(
-    r'<a\s+[^>]*href="(https://hanime1\.me/watch\?v=\d+)"[^>]*>',
-    re.S | re.I,
-)
-
 
 def crawl(limit: int = 10) -> list[dict]:
-    """返回视频列表,每项包含 url / title / thumbnail_url / site。"""
     if curl_requests is None:
         raise RuntimeError("curl_cffi 未安装")
+    if BeautifulSoup is None:
+        raise RuntimeError("beautifulsoup4 未安装")
 
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
 
@@ -51,44 +45,31 @@ def crawl(limit: int = 10) -> list[dict]:
         except Exception:
             continue
 
-        html = resp.text
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        for m in _A_RE.finditer(html):
+        for a in soup.find_all("a", href=re.compile(r"^https://hanime1\.me/watch\?v=\d+")):
             if len(results) >= limit:
                 break
-            href = m.group(1)
-            if href in seen_urls:
+            href = a.get("href", "")
+            if not href or href in seen_urls:
                 continue
             seen_urls.add(href)
 
-            # --- 缩略图:只在 <a> 开始后 500 字符内的 <img> 里找 ---
+            # 缩略图: 在 <a> 内部找 <img>
             thumb = ""
-            img_area = html[m.end():m.end() + 500]
-            mm = re.search(r'<img[^>]*src="([^"]*)"[^>]*>', img_area, re.S | re.I)
-            if mm:
-                thumb = mm.group(1).strip()
-            if not thumb:
-                mm = re.search(r'<img[^>]*data-src="([^"]*)"[^>]*>', img_area, re.S | re.I)
-                if mm:
-                    thumb = mm.group(1).strip()
-            if thumb and not thumb.startswith("http"):
-                thumb = urljoin(BASE_URL, thumb)
+            img = a.find("img")
+            if img:
+                thumb = img.get("src") or img.get("data-src") or ""
 
-            # --- 标题:只在 <a> 开始前 500 字符内的 div title 里找 ---
+            # 标题: 优先祖父级 div title, 其次 <a> 的 title, 最后 img alt
             title = ""
-            title_area = html[max(0, m.start() - 500):m.start()]
-            mm = re.search(r'<div[^>]*title="([^"]*)"', title_area, re.S | re.I)
-            if mm:
-                t = mm.group(1).strip()
-                if len(t) > 1:
-                    title = t
-            if not title:
-                # 兜底:在 <a> 内部找 img alt
-                mm = re.search(r'alt="([^"]*)"', img_area, re.S | re.I)
-                if mm:
-                    t = mm.group(1).strip()
-                    if len(t) > 1:
-                        title = t
+            parent = a.find_parent()
+            if parent and parent.get("title"):
+                title = parent.get("title").strip()
+            if not title and a.get("title"):
+                title = a.get("title").strip()
+            if not title and img and img.get("alt"):
+                title = img.get("alt").strip()
             if not title:
                 title = "(无标题)"
 
