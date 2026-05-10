@@ -1,7 +1,7 @@
 """hanime1.me 视频采集器。
 
-策略:请求首页,用正则提取所有 href="https://hanime1.me/watch?v=xxx" 链接,
-然后在链接附近找缩略图(img src)和标题(div title 或 a title)。
+策略:用正则找到所有 <a href="https://hanime1.me/watch?v=xxx"> 的精确位置,
+对每个匹配取附近 HTML 提取缩略图(img src)和标题(div title / a title / img alt)。
 """
 import re
 from urllib.parse import urljoin
@@ -16,6 +16,12 @@ LIST_URLS = [
     "https://hanime1.me/",
     "https://hanime1.me/search?sort=%E6%9C%80%E8%BF%91%E6%9B%B4%E6%96%B0",
 ]
+
+# 匹配 <a href="https://hanime1.me/watch?v=数字" ...>
+_A_RE = re.compile(
+    r'<a\s+[^>]*href="(https://hanime1\.me/watch\?v=\d+)"[^>]*>',
+    re.S | re.I,
+)
 
 
 def crawl(limit: int = 10) -> list[dict]:
@@ -46,57 +52,54 @@ def crawl(limit: int = 10) -> list[dict]:
 
         html = resp.text
 
-        # 步骤1: 暴力提取所有 href="https://hanime1.me/watch?v=数字" 链接
-        hrefs = re.findall(r'href="(https://hanime1\.me/watch\?v=\d+)"', html)
-        unique_hrefs = []
-        for h in hrefs:
-            if h not in unique_hrefs:
-                unique_hrefs.append(h)
-
-        for href in unique_hrefs:
+        for m in _A_RE.finditer(html):
             if len(results) >= limit:
                 break
+            href = m.group(1)
             if href in seen_urls:
                 continue
             seen_urls.add(href)
 
-            # 步骤2: 在链接出现的位置附近找缩略图和标题
-            pos = html.find(href)
-            nearby = html[max(0, pos - 1200):min(len(html), pos + 1200)]
+            # 取匹配位置前后 1000 字符
+            start = max(0, m.start() - 1000)
+            end = min(len(html), m.end() + 1000)
+            nearby = html[start:end]
 
-            # 找缩略图: 附近 img 的 src / data-src
+            # 缩略图: 优先 vdownload.hembed.com, 其次任何 src
             thumb = ""
-            for img_pat in [
-                r'<img[^>]*src="(https://vdownload\.hembed\.com[^"]*)"[^>]*>',
-                r'<img[^>]*src="([^"]*thumbnail[^"]*)"[^>]*>',
-                r'<img[^>]*src="([^"]+)"[^>]*>',
+            for pat in [
+                r'src="(https://vdownload\.hembed\.com[^"]*)"',
+                r'src="([^"]*thumbnail[^"]*)"',
+                r'src="([^"]+\.(?:jpg|jpeg|png|webp))"',
+                r'data-src="([^"]*)"',
             ]:
-                m = re.search(img_pat, nearby, re.S | re.I)
-                if m:
-                    thumb = m.group(1)
+                mm = re.search(pat, nearby, re.S | re.I)
+                if mm:
+                    thumb = mm.group(1)
                     break
 
             if thumb and not thumb.startswith("http"):
                 thumb = urljoin(BASE_URL, thumb)
 
-            # 找标题: 优先附近 div title / a title, 其次附近文本
+            # 标题: 优先 div title / a title, 其次 img alt, 最后附近文本
             title = ""
-            for title_pat in [
+            for pat in [
                 r'<div[^>]*title="([^"]*)"[^>]*>',
                 r'<a[^>]*title="([^"]*)"[^>]*>',
+                r'alt="([^"]*)"',
             ]:
-                m = re.search(title_pat, nearby, re.S | re.I)
-                if m:
-                    title = m.group(1).strip()
-                    if title:
+                mm = re.search(pat, nearby, re.S | re.I)
+                if mm:
+                    t = mm.group(1).strip()
+                    if t and len(t) > 2:
+                        title = t
                         break
 
             if not title:
-                # 兜底: 从附近纯文本中提取一段看起来像标题的文字
-                txt_matches = re.findall(r'>([^<]{5,60})<', nearby)
-                for t in txt_matches:
+                txt = re.findall(r'>([^<]{5,60})<', nearby)
+                for t in txt:
                     t = t.strip()
-                    if t and not t.startswith(('http', '<', 'div', 'span', 'img')):
+                    if t and not t.startswith(('http', '<', 'div', 'span', 'img', 'script')):
                         title = t
                         break
 
