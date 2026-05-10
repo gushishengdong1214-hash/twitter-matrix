@@ -76,33 +76,26 @@ def push_config(worker: dict) -> None:
                      f"{WORKER_REMOTE_DIR}/config.json")
 
 
-def push_tasks(worker: dict, tasks: list[dict]) -> None:
-    """推送任务列表到 worker，与 worker 本地 tasks.json 合并而非覆盖。
+FINAL_STATUSES = {"done", "failed", "human_required"}
+
+
+def _merge_tasks(local_tasks: list[dict], remote_tasks: list[dict]) -> list[dict]:
+    """合并本地（中控）和远程（worker）任务列表。
 
     合并策略：
-    - worker 已标记为终态（done / failed / human_required）的任务，保留 worker 版本
-    - 其余任务以中控版本为准（scheduled / running / pending）
-    - worker 本地有但中控未推送的终态历史任务，保留在文件里
-    """
-    # 1) 先拉取 worker 当前 tasks.json
-    remote_tasks = []
-    try:
-        with SSHClient(**_creds(worker)) as ssh:
-            remote_text = ssh.get_text(f"{WORKER_REMOTE_DIR}/tasks.json")
-            if remote_text:
-                remote_tasks = json.loads(remote_text)
-    except Exception:
-        remote_tasks = []
+    - 终态任务（done/failed/human_required）保留 worker 版本
+    - 其余以中控版本为准
+    - worker 独有的终态历史任务也保留
 
+    纯函数，无 I/O，便于测试。
+    """
     remote_by_id = {t["id"]: t for t in remote_tasks if "id" in t}
-    local_ids = {t["id"] for t in tasks}
-    FINAL_STATUSES = {"done", "failed", "human_required"}
+    local_ids = {t["id"] for t in local_tasks}
 
     payload = []
-    for t in tasks:
+    for t in local_tasks:
         tid = t["id"]
         rt = remote_by_id.get(tid)
-        # worker 已跑到终态 → 绝不覆盖，保留 worker 的 done/failed/human_required
         if rt and rt.get("status") in FINAL_STATUSES:
             payload.append(rt)
         else:
@@ -115,10 +108,25 @@ def push_tasks(worker: dict, tasks: list[dict]) -> None:
                 "attempt": t.get("attempt", 0),
             })
 
-    # 保留 worker 本地有但中控本次不推的终态历史任务，避免丢失记录
     for rt in remote_tasks:
         if rt.get("id") not in local_ids and rt.get("status") in FINAL_STATUSES:
             payload.append(rt)
+
+    return payload
+
+
+def push_tasks(worker: dict, tasks: list[dict]) -> None:
+    """推送任务列表到 worker，与 worker 本地 tasks.json 合并而非覆盖。"""
+    remote_tasks = []
+    try:
+        with SSHClient(**_creds(worker)) as ssh:
+            remote_text = ssh.get_text(f"{WORKER_REMOTE_DIR}/tasks.json")
+            if remote_text:
+                remote_tasks = json.loads(remote_text)
+    except Exception:
+        remote_tasks = []
+
+    payload = _merge_tasks(tasks, remote_tasks)
 
     with SSHClient(**_creds(worker)) as ssh:
         ssh.put_text(json.dumps(payload, ensure_ascii=False, indent=2),
@@ -287,6 +295,15 @@ export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y python3 python3-pip python3-venv vnstat ffmpeg curl wget
+
+# 开 4GB swap（2GB 内存机器必需，否则 Chromium OOM）
+if [ ! -f /swapfile ]; then
+    fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 systemctl enable vnstat || true
 systemctl start vnstat || true

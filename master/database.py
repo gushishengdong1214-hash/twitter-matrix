@@ -1,10 +1,15 @@
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Iterable
 
 DB_PATH = Path(__file__).parent / "data" / "matrix.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# SQLite 不是线程安全的写操作；daemon 的 ThreadPoolExecutor 会并发同步多个 Worker
+# 用锁确保同一时刻只有一个线程执行 DB 写操作（读可以并发，WAL 模式支持）
+_db_write_lock = threading.Lock()
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -96,6 +101,7 @@ CREATE TABLE IF NOT EXISTS crawled_videos (
     original_description TEXT,
     translated_caption TEXT,
     thumbnail_url TEXT,
+    score INTEGER DEFAULT 0,
     status TEXT DEFAULT 'pending',
     worker_id INTEGER,
     created_at TEXT DEFAULT (datetime('now', 'localtime')),
@@ -114,8 +120,9 @@ def init_db() -> None:
 
 def _migrate(conn) -> None:
     """幂等加列。已有列不会重复加。"""
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(workers)").fetchall()}
-    migrations = [
+    # workers 表迁移
+    existing_workers = {r[1] for r in conn.execute("PRAGMA table_info(workers)").fetchall()}
+    worker_migrations = [
         ("user_agent", "TEXT"),
         ("viewport_width", "INTEGER DEFAULT 1920"),
         ("viewport_height", "INTEGER DEFAULT 1080"),
@@ -125,20 +132,28 @@ def _migrate(conn) -> None:
         ("twofa_secret", "TEXT"),
         ("last_log_offset", "INTEGER DEFAULT 0"),
     ]
-    for col, typ in migrations:
-        if col not in existing:
+    for col, typ in worker_migrations:
+        if col not in existing_workers:
             conn.execute(f"ALTER TABLE workers ADD COLUMN {col} {typ}")
+
+    # crawled_videos 表迁移
+    existing_crawled = {r[1] for r in conn.execute("PRAGMA table_info(crawled_videos)").fetchall()}
+    if "score" not in existing_crawled:
+        conn.execute("ALTER TABLE crawled_videos ADD COLUMN score INTEGER DEFAULT 0")
 
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+    # 串行化所有 DB 访问，防止 daemon 的 ThreadPoolExecutor 并发同步时触发
+    # "database is locked"（SQLite 写锁竞争）。WAL 模式允许并发读，但写仍串行。
+    with _db_write_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------- proxies ----------
@@ -322,15 +337,15 @@ def prune_logs(keep_last: int = 20000) -> None:
 
 def add_crawled_video(url: str, url_hash: str, site: str, title: str = "",
                       original_description: str = "", translated_caption: str = "",
-                      thumbnail_url: str = "") -> int | None:
+                      thumbnail_url: str = "", score: int = 0) -> int | None:
     """插入一条采集记录。如果 url_hash 已存在则返回 None（去重）。"""
     with get_conn() as c:
         try:
             cur = c.execute(
                 """INSERT INTO crawled_videos
-                    (url, url_hash, site, title, original_description, translated_caption, thumbnail_url)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (url, url_hash, site, title, original_description, translated_caption, thumbnail_url),
+                    (url, url_hash, site, title, original_description, translated_caption, thumbnail_url, score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (url, url_hash, site, title, original_description, translated_caption, thumbnail_url, score),
             )
             return cur.lastrowid
         except sqlite3.IntegrityError:

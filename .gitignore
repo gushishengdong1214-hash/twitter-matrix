@@ -24,3 +24,10 @@ worker/__pycache__/
 *.mp4
 *.png
 !master/static/**/*.png
+
+# 爬虫测试输出（运行 crawler 时生成的样本，不入库）
+master/crawl_test*.json
+master/hanime1_titles*.json
+
+# 根目录的 requirements.txt 是本地草稿，部署走 master/requirements.txt + worker/requirements.txt
+/requirements.txt

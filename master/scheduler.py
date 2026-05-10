@@ -87,7 +87,14 @@ def plan_today_for_worker(worker: dict) -> int:
 
 
 def plan_today_for_all() -> dict[int, int]:
-    return {w["id"]: plan_today_for_worker(w) for w in db.list_workers()}
+    result = {}
+    for w in db.list_workers():
+        # 跳过不健康 Worker：human_required/error/paused 状态的 Worker 不应接收新任务
+        if w.get("status") in ("human_required", "error", "paused"):
+            result[w["id"]] = -1  # -1 表示跳过
+            continue
+        result[w["id"]] = plan_today_for_worker(w)
+    return result
 
 
 def get_today_active_tasks(worker_id: int) -> list[dict]:

@@ -1,5 +1,6 @@
 """hanime1.me 视频采集器 — BeautifulSoup 版。"""
 import re
+import unicodedata
 from urllib.parse import urljoin
 
 try:
@@ -65,17 +66,51 @@ def crawl(limit: int = 10) -> list[dict]:
             if img:
                 thumb = img.get("src") or img.get("data-src") or ""
 
-            # 标题: 优先祖父级 div title, 其次 <a> 的 title, 最后 img alt
+            # 标题提取策略：
+            # 1) <a title="...">
+            # 2) <img alt="...">
+            # 3) 祖父级 div title
+            # 4) a.text 去掉时长/thumb_up/百分比/观看数前缀
             title = ""
-            parent = a.find_parent()
-            if parent and parent.get("title"):
-                title = parent.get("title").strip()
-            if not title and a.get("title"):
+            if a.get("title"):
                 title = a.get("title").strip()
             if not title and img and img.get("alt"):
                 title = img.get("alt").strip()
             if not title:
+                parent = a.find_parent()
+                if parent and parent.get("title"):
+                    title = parent.get("title").strip()
+            if not title:
+                # hanime1 的 a.text 包含 "时长thumb_up百分比观看数标题"
+                # 例: "06:01thumb_up100%141👁TRIGGER GRITY CINEMA 4K"
+                txt = a.get_text(strip=True)
+                # 先尝试直接匹配 thumb_up + 百分比 + 数字 + 标题
+                m = re.search(r'thumb_up\s*\d+%\s*\d+\s*(.+)', txt, re.IGNORECASE)
+                if m:
+                    title = m.group(1).strip()
+                else:
+                    # fallback: 逐步去掉已知前缀
+                    title = re.sub(r'^\d{1,2}:\d{2}\s*', '', txt)
+                    title = re.sub(r'thumb_up\s*\d+%', '', title, flags=re.IGNORECASE)
+                    title = re.sub(r'^\d+\s*', '', title)
+                    # 去掉开头的 emoji/特殊符号
+                    title = re.sub(r'^[☀-➿　-〿\s]+', '', title)
+                    # 去掉 hanime1 特有的观看次数前缀：.9萬次 / 萬次 / 次
+                    title = re.sub(r'^\.?\d+萬次', '', title)
+                    title = re.sub(r'^萬次', '', title)
+                    title = re.sub(r'^次', '', title)
+                    title = title.strip()
+            if not title:
                 title = "(无标题)"
+
+            # 统一清理：去掉开头 emoji/符号/空格
+            while title and unicodedata.category(title[0]) in ('So', 'Sc', 'Sk', 'Sm', 'Zs', 'Cc', 'Cf', 'Co'):
+                title = title[1:]
+            # 去掉观看次数前缀
+            title = re.sub(r'^\.?\d+萬次', '', title)
+            title = re.sub(r'^萬次', '', title)
+            title = re.sub(r'^次', '', title)
+            title = title.strip()
 
             results.append({
                 "url": href,

@@ -85,18 +85,20 @@ def crawl(limit: int = 10) -> list[dict]:
                     title = a.get("title").strip()
                 if not title:
                     txt = a.get_text(strip=True)
-                    if txt and len(txt) > 1:
+                    # jable 的 a.text 通常是时长(如 "2:15:35")，不是标题，跳过
+                    if txt and len(txt) > 1 and not re.match(r'^\d{1,2}:\d{2}:\d{2}$', txt):
                         title = txt
-                # 兜底: 在父元素里找标题
+                # 兜底: 在祖先元素里找标题
                 if not title:
-                    for parent in [a.find_parent(), a.find_parent().find_parent()]:
-                        if not parent:
+                    for ancestor in [a.find_parent(), a.find_parent().find_parent(),
+                                     a.find_parent().find_parent().find_parent()]:
+                        if not ancestor:
                             continue
-                        for sel in [".title", ".video-title", "h6", "h5", "h3"]:
-                            el = parent.select_one(sel)
+                        for sel in [".title", ".video-title", "h6", "h5", "h3", "h4", "h2", ".name"]:
+                            el = ancestor.select_one(sel)
                             if el:
                                 t = el.get_text(strip=True)
-                                if t and len(t) > 1:
+                                if t and len(t) > 1 and not re.match(r'^\d{1,2}:\d{2}:\d{2}$', t):
                                     title = t
                                     break
                         if title:
