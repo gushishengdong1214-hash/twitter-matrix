@@ -29,7 +29,24 @@ import socks_relay
 
 WORK_DIR = Path("/opt/twitter-worker")
 SCREENSHOT_DIR = WORK_DIR / "screenshots"
-VIDEO_TEMP = Path("/tmp/twitter-worker-video.mp4")
+VIDEO_TEMP_DIR = Path("/tmp")
+VIDEO_TEMP_PREFIX = "twitter-worker-video-"
+
+
+def video_temp_for(task_id: int) -> Path:
+    return VIDEO_TEMP_DIR / f"{VIDEO_TEMP_PREFIX}{task_id}.mp4"
+
+
+def cleanup_all_video_temps():
+    """清理 /tmp 下所有 worker 视频残留(防止 Bug A:残留文件被下一任务复用)。"""
+    try:
+        for p in VIDEO_TEMP_DIR.glob(f"{VIDEO_TEMP_PREFIX}*.mp4"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 CONFIG_FILE = WORK_DIR / "config.json"
 TASKS_FILE = WORK_DIR / "tasks.json"
@@ -156,6 +173,15 @@ def run_one_task(task: dict, config: dict):
     tid = task["id"]
     url = task["video_url"]
     caption = task["caption"]
+    video_temp = video_temp_for(tid)
+
+    # 任务开头强制清理同名残留(防 Bug A:上次任务的不完整文件被复用)
+    if video_temp.exists():
+        try:
+            video_temp.unlink()
+            log(f"清理任务 {tid} 同名残留")
+        except Exception:
+            pass
 
     log(f"=== 任务 {tid} 开始 === {url[:80]}")
     update_task_in_file(tid, status="running", started_at=_now_str(), attempt=task.get("attempt", 0) + 1)
@@ -164,8 +190,14 @@ def run_one_task(task: dict, config: dict):
     pw_proxy, yt_proxy = proxy_dicts(config)
     user_agent = config.get("user_agent") or eng.DEFAULT_UA
 
-    if not eng.download_video(url, VIDEO_TEMP, yt_proxy, pw_proxy, user_agent, log):
+    if not eng.download_video(url, video_temp, yt_proxy, pw_proxy, user_agent, log):
         log(f"任务 {tid} 下载失败")
+        # 部分写入的文件也要清掉,防止下次复用
+        if video_temp.exists():
+            try:
+                video_temp.unlink()
+            except Exception:
+                pass
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message="download failed")
         return
@@ -174,7 +206,7 @@ def run_one_task(task: dict, config: dict):
         eng.post_to_twitter(
             config=config,
             caption=caption,
-            video_path=VIDEO_TEMP,
+            video_path=video_temp,
             pw_proxy=pw_proxy,
             screenshot_dir=SCREENSHOT_DIR,
             log=log,
@@ -205,9 +237,9 @@ def run_one_task(task: dict, config: dict):
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message=str(e))
     finally:
-        if VIDEO_TEMP.exists():
+        if video_temp.exists():
             try:
-                VIDEO_TEMP.unlink()
+                video_temp.unlink()
             except Exception:
                 pass
 
@@ -232,6 +264,7 @@ def main_loop():
     update_state(status="idle", current_task_id=None)
     log("Worker 启动")
     reset_stale_running_tasks()
+    cleanup_all_video_temps()
 
     while _running:
         cmd = consume_command()

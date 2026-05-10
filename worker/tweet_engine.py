@@ -68,8 +68,27 @@ def _try_handle_twofa(page, twofa_secret: str, log) -> bool:
 
 
 def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Optional[str]:
-    """对 jable.tv 这类站点,用浏览器嗅探真实视频流。"""
+    """对 jable.tv / hanime1.me 这类站点,用浏览器嗅探真实视频流。
+
+    多层策略,按优先级:
+      1) 主策略:打开页面后,从 DOM 里读主 <video> 元素的 currentSrc / src(若是 m3u8 URL 直接命中)。
+         注:jable 用 HLS.js,video.src 通常是 blob,这层会 miss → 走下面
+      2) 兜底 1:抓所有 m3u8 请求,排除预览/广告/缩略图等 URL 模式后,
+         只剩 1 个就用它;有多个就 GET 一遍 m3u8 内容,选 #EXTINF segment 数最多的
+         (主视频通常 segment 数 >> 推荐位预览)
+      3) 兜底 2:若以上都失败,fallback 到旧逻辑(返回排除后的第一个)
+    """
     log("打开浏览器嗅探 m3u8...")
+    # 详情页常见的非主视频 m3u8 模式 — 主要排除推荐位 hover preview / 广告 / 缩略图
+    EXCLUDE_PATTERNS = [
+        "/preview", "/trailer", "/thumb", "/thumbnail",
+        "/ad/", "/ads/", "preview.m3u8", "/sprite",
+    ]
+
+    def is_excluded(u: str) -> bool:
+        ul = u.lower()
+        return any(pat in ul for pat in EXCLUDE_PATTERNS)
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, proxy=pw_proxy)
@@ -80,12 +99,71 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                 "request",
                 lambda r: captured.append(r.url) if ".m3u8" in r.url else None,
             )
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(8000)
-            browser.close()
-            for link in captured:
-                if ".m3u8" in link:
-                    return link
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(8000)
+
+                # 主策略:DOM 里找主 video 元素的 m3u8 src
+                try:
+                    video_src = page.evaluate(
+                        """() => {
+                            const vs = document.querySelectorAll('video');
+                            for (const v of vs) {
+                                const s = v.currentSrc || v.src || '';
+                                if (s && s.includes('.m3u8')) return s;
+                            }
+                            return null;
+                        }"""
+                    )
+                    if video_src:
+                        log(f"主策略:从 <video>.currentSrc 命中 m3u8")
+                        return video_src
+                except Exception as e:
+                    log(f"主策略读 video 元素失败:{e}")
+
+                # 兜底 1:过滤掉已知非主视频模式
+                unique = list(dict.fromkeys(captured))  # 去重保序
+                filtered = [u for u in unique if not is_excluded(u)]
+                log(f"嗅到 {len(unique)} 个 m3u8,排除预览/广告/缩略图后剩 {len(filtered)} 个")
+
+                if not filtered:
+                    log("所有 m3u8 都被排除,放弃")
+                    return None
+
+                if len(filtered) == 1:
+                    return filtered[0]
+
+                # 多个候选:GET 每个 m3u8,选 #EXTINF segment 数最多的
+                best = None
+                best_count = -1
+                for m3u8_url in filtered:
+                    try:
+                        resp = page.request.get(m3u8_url, timeout=10_000)
+                        if not resp.ok:
+                            continue
+                        text = resp.text()
+                        seg_count = text.count("#EXTINF")
+                        if seg_count == 0:
+                            # 可能是 master playlist,粗略计数 .ts / 行数
+                            seg_count = max(text.count(".ts"), len(text.splitlines()))
+                        if seg_count > best_count:
+                            best_count = seg_count
+                            best = m3u8_url
+                    except Exception:
+                        continue
+
+                if best:
+                    log(f"次兜底:多候选,选 segment 数最多 ({best_count}) 的 m3u8")
+                    return best
+
+                # 最后兜底:返回排除后的第一个
+                log("兜底 2:返回排除后的第一个 m3u8")
+                return filtered[0]
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
     except Exception as e:
         log(f"m3u8 嗅探失败:{e}")
     return None
@@ -99,10 +177,6 @@ def download_video(
     user_agent: str,
     log,
 ) -> bool:
-    if out_path.exists() and out_path.stat().st_size > 10 * 1024 * 1024:
-        log(f"已有完整视频 {out_path}, 跳过下载")
-        return True
-
     # 通用策略:先用浏览器嗅 m3u8(过 Cloudflare 等反爬),嗅到就用 m3u8 给 yt-dlp,
     # 没嗅到再 fallback 给 yt-dlp 原 URL(yt-dlp 内置支持很多站)。
     # jable.tv 特殊:嗅不到就直接放弃,因为 yt-dlp 会拒绝它的页面 URL。
