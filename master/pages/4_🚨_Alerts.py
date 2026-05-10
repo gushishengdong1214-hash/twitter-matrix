@@ -7,6 +7,15 @@ import sync as syn
 
 st.set_page_config(page_title="告警", page_icon="🚨", layout="wide")
 st.title("🚨 告警 / 人工处理队列")
+
+# 告警类型中文映射
+_ALERT_TYPE_MAP = {
+    "popup_unknown": "未知弹窗",
+}
+
+
+def zh_alert_type(t):
+    return _ALERT_TYPE_MAP.get(t, t) if t else "—"
 st.caption(
     "Worker 探测到未知卡住状态会暂停并上报。"
     "处理流程:看截图 → 在 worker/popup_handler.py 加规则 → "
@@ -26,7 +35,7 @@ else:
             with cols[0]:
                 st.markdown(
                     f"**{a.get('worker_nickname', '?')}** &nbsp; "
-                    f"类型 `{a.get('type')}` &nbsp; 任务 ID {a.get('task_id') or '-'}"
+                    f"类型 `{zh_alert_type(a.get('type'))}` &nbsp; 任务 ID {a.get('task_id') or '-'}"
                 )
                 st.caption(f"上报时间:{a['created_at']}")
                 if a.get("message"):

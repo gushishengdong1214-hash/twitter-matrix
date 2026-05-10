@@ -86,6 +86,23 @@ CREATE TABLE IF NOT EXISTS logs (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_logs_worker_time ON logs(worker_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawled_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL UNIQUE,
+    url_hash TEXT NOT NULL UNIQUE,
+    site TEXT NOT NULL,
+    title TEXT,
+    original_description TEXT,
+    translated_caption TEXT,
+    thumbnail_url TEXT,
+    status TEXT DEFAULT 'pending',
+    worker_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crawled_status ON crawled_videos(status);
+CREATE INDEX IF NOT EXISTS idx_crawled_site ON crawled_videos(site);
 """
 
 
@@ -299,6 +316,77 @@ def prune_logs(keep_last: int = 20000) -> None:
                 SELECT id FROM logs ORDER BY id DESC LIMIT ?
             )
         """, (keep_last,))
+
+
+# ---------- crawled_videos ----------
+
+def add_crawled_video(url: str, url_hash: str, site: str, title: str = "",
+                      original_description: str = "", translated_caption: str = "",
+                      thumbnail_url: str = "") -> int | None:
+    """插入一条采集记录。如果 url_hash 已存在则返回 None（去重）。"""
+    with get_conn() as c:
+        try:
+            cur = c.execute(
+                """INSERT INTO crawled_videos
+                    (url, url_hash, site, title, original_description, translated_caption, thumbnail_url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (url, url_hash, site, title, original_description, translated_caption, thumbnail_url),
+            )
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+
+def is_url_crawled(url_hash: str) -> bool:
+    with get_conn() as c:
+        r = c.execute("SELECT 1 FROM crawled_videos WHERE url_hash = ? LIMIT 1", (url_hash,)).fetchone()
+        return bool(r)
+
+
+def list_crawled_videos(status: Optional[str] = None, site: Optional[str] = None,
+                        limit: int = 500) -> list[dict]:
+    sql = "SELECT * FROM crawled_videos WHERE 1=1"
+    args: list = []
+    if status is not None:
+        sql += " AND status = ?"
+        args.append(status)
+    if site is not None:
+        sql += " AND site = ?"
+        args.append(site)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with get_conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def update_crawled_video(vid: int, **fields) -> None:
+    if not fields:
+        return
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    with get_conn() as c:
+        c.execute(f"UPDATE crawled_videos SET {cols} WHERE id = ?", (*fields.values(), vid))
+
+
+def delete_crawled_video(vid: int) -> None:
+    with get_conn() as c:
+        c.execute("DELETE FROM crawled_videos WHERE id = ?", (vid,))
+
+
+def approve_crawled_video(vid: int, worker_id: int) -> int | None:
+    """把一条已采集的视频批准并转为任务。返回任务 ID。"""
+    with get_conn() as c:
+        row = c.execute("SELECT * FROM crawled_videos WHERE id = ?", (vid,)).fetchone()
+        if not row:
+            return None
+        row = dict(row)
+        caption = row.get("translated_caption") or row.get("title") or ""
+        cur = c.execute(
+            "INSERT INTO tasks (worker_id, video_url, caption, status) VALUES (?, ?, ?, 'pending')",
+            (worker_id, row["url"], caption),
+        )
+        c.execute("UPDATE crawled_videos SET status = 'approved', worker_id = ? WHERE id = ?",
+                  (worker_id, vid))
+        return cur.lastrowid
 
 
 if __name__ == "__main__":

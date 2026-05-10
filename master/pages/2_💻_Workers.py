@@ -11,6 +11,21 @@ st.set_page_config(page_title="Workers", page_icon="💻", layout="wide")
 st.title("💻 Workers (VPS 节点)")
 st.caption("1 Worker = 1 VPS + 1 静态住宅代理 + 1 推特账号。")
 
+# ========== 状态中文映射 ==========
+_WORKER_STATUS_MAP = {
+    "idle": "空闲",
+    "running": "运行中",
+    "paused": "已暂停",
+    "error": "错误",
+    "human_required": "需人工处理",
+    "provisioning": "部署中",
+    "pending": "待配置",
+}
+
+
+def zh_worker_status(s):
+    return _WORKER_STATUS_MAP.get(s, s) if s else "—"
+
 TIMEZONES = [
     ("美国 - 纽约(东部)", "America/New_York"),
     ("美国 - 芝加哥(中部)", "America/Chicago"),
@@ -334,7 +349,7 @@ else:
                 st.markdown(f"流量 **{w.get('traffic_used_gb') or 0:.1f} / {w.get('traffic_quota_gb')} G**({pct:.0f}%)")
                 st.progress(min(1.0, pct / 100))
             with cols[2]:
-                st.markdown(f"`{w['status']}`")
+                st.markdown(f"`{zh_worker_status(w['status'])}`")
                 st.caption(w.get("last_heartbeat") or "未上线")
 
             b1, b2, b3, b4, b5, b6, b7, b8 = st.columns(8)

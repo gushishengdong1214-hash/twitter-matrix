@@ -24,16 +24,34 @@ if _PASSWORD:
 st.title("推特矩阵中控")
 st.caption(f"快照时间:{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+# ========== Worker 状态中文映射 ==========
+_WORKER_STATUS_MAP = {
+    "idle": "空闲", "running": "运行中", "paused": "已暂停",
+    "error": "错误", "human_required": "需人工处理",
+    "provisioning": "部署中", "pending": "待配置",
+}
+_TASK_STATUS_MAP = {
+    "pending": "等待中", "scheduled": "已排期", "running": "执行中",
+    "done": "已完成", "failed": "失败", "human_required": "需人工",
+}
+
+
+def zh_worker_status(s):
+    return _WORKER_STATUS_MAP.get(s, s) if s else "—"
+
+
 workers = db.list_workers()
 counts = db.task_counts_by_worker()
 unresolved = db.list_alerts(only_unresolved=True, limit=999)
 
-c1, c2, c3, c4, c5 = st.columns(5)
+candidates = db.list_crawled_videos(status="pending", limit=9999)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Worker 总数", len(workers))
 c2.metric("空闲", sum(1 for w in workers if w["status"] == "idle"))
 c3.metric("运行中", sum(1 for w in workers if w["status"] == "running"))
 c4.metric("待人工处理", len(unresolved))
 c5.metric("出错", sum(1 for w in workers if w["status"] in ("error", "human_required", "paused")))
+c6.metric("候选池待审", len(candidates))
 
 st.divider()
 st.subheader("Worker 状态")
@@ -57,12 +75,12 @@ else:
                 "error": "🔴", "paused": "🟡", "provisioning": "🟡",
                 "pending": "⚪",
             }.get(status, "⚪")
-            cols[2].markdown(f"{color} `{status}`")
+            cols[2].markdown(f"{color} `{zh_worker_status(status)}`")
             cols[2].caption(w.get("last_heartbeat") or "未上线")
 
             t = counts.get(w["id"], {})
             cols[3].caption(
-                f"待:{t.get('pending', 0)} | 计:{t.get('scheduled', 0)} | "
+                f"等:{t.get('pending', 0)} | 排:{t.get('scheduled', 0)} | "
                 f"跑:{t.get('running', 0)} | 完:{t.get('done', 0)} | 败:{t.get('failed', 0)}"
             )
 
