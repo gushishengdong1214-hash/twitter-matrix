@@ -66,6 +66,9 @@ def crawl(limit: int = 10) -> list[dict]:
                     break
                 href = m.group(1)
                 full_url = urljoin(BASE_URL, href)
+                # 过滤:只保留 /videos/xxx/ 格式的视频页面链接
+                if not re.search(r'/videos/[^/]{3,}/?$', full_url):
+                    continue
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)

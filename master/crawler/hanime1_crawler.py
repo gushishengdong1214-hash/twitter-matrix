@@ -1,7 +1,7 @@
 """hanime1.me 视频采集器。
 
-策略:请求首页,用正则暴力提取所有 /watch?v=xxx 链接及其附近的标题/缩略图。
-不依赖特定 class 名,容错性最强。
+策略:请求首页,用正则提取所有 href="https://hanime1.me/watch?v=xxx" 链接,
+然后在链接附近找缩略图(img src)和标题(div title 或 a title)。
 """
 import re
 from urllib.parse import urljoin
@@ -16,17 +16,6 @@ LIST_URLS = [
     "https://hanime1.me/",
     "https://hanime1.me/search?sort=%E6%9C%80%E8%BF%91%E6%9B%B4%E6%96%B0",
 ]
-
-# 匹配 watch?v=数字 的链接(hanime1用完整URL: https://hanime1.me/watch?v=xxx)
-_WATCH_RE = re.compile(
-    r'<a\s+[^>]*href="(https://hanime1\.me/watch\?v=\d+)"[^>]*>(.*?)</a>',
-    re.S | re.I,
-)
-# 从一段 HTML 片段里找 img 的 src / alt
-_IMG_RE = re.compile(r'<img\s+[^>]*src="([^"]+)"[^>]*>', re.S | re.I)
-_IMG_ALT_RE = re.compile(r'<img\s+[^>]*alt="([^"]*)"[^>]*>', re.S | re.I)
-# 从一段 HTML 片段里找文本标题（简单去掉标签后的文字）
-_TITLE_RE = re.compile(r'>([^<]{3,80})<', re.S)
 
 
 def crawl(limit: int = 10) -> list[dict]:
@@ -57,52 +46,65 @@ def crawl(limit: int = 10) -> list[dict]:
 
         html = resp.text
 
-        # 策略1: 正则暴力提取 <a href="/watch?v=xxx">...</a>
-        for m in _WATCH_RE.finditer(html):
+        # 步骤1: 暴力提取所有 href="https://hanime1.me/watch?v=数字" 链接
+        hrefs = re.findall(r'href="(https://hanime1\.me/watch\?v=\d+)"', html)
+        unique_hrefs = []
+        for h in hrefs:
+            if h not in unique_hrefs:
+                unique_hrefs.append(h)
+
+        for href in unique_hrefs:
             if len(results) >= limit:
                 break
-            href = m.group(1)
-            full_url = urljoin(BASE_URL, href)
-            if full_url in seen_urls:
+            if href in seen_urls:
                 continue
-            seen_urls.add(full_url)
+            seen_urls.add(href)
 
-            inner = m.group(2)
-            # 从 inner 找缩略图
+            # 步骤2: 在链接出现的位置附近找缩略图和标题
+            pos = html.find(href)
+            nearby = html[max(0, pos - 1200):min(len(html), pos + 1200)]
+
+            # 找缩略图: 附近 img 的 src / data-src
             thumb = ""
-            img_m = _IMG_RE.search(inner)
-            if img_m:
-                thumb = img_m.group(1)
-            else:
-                # 扩大范围:在匹配点前后 500 字符内找 img
-                start = max(0, m.start() - 500)
-                end = min(len(html), m.end() + 500)
-                nearby = html[start:end]
-                img_m2 = _IMG_RE.search(nearby)
-                if img_m2:
-                    thumb = img_m2.group(1)
+            for img_pat in [
+                r'<img[^>]*src="(https://vdownload\.hembed\.com[^"]*)"[^>]*>',
+                r'<img[^>]*src="([^"]*thumbnail[^"]*)"[^>]*>',
+                r'<img[^>]*src="([^"]+)"[^>]*>',
+            ]:
+                m = re.search(img_pat, nearby, re.S | re.I)
+                if m:
+                    thumb = m.group(1)
+                    break
 
             if thumb and not thumb.startswith("http"):
                 thumb = urljoin(BASE_URL, thumb)
 
-            # 标题:优先 img 的 alt,其次 inner 里的文本
+            # 找标题: 优先附近 div title / a title, 其次附近文本
             title = ""
-            alt_m = _IMG_ALT_RE.search(inner)
-            if alt_m:
-                title = alt_m.group(1)
-            else:
-                alt_m2 = _IMG_ALT_RE.search(nearby) if 'nearby' in dir() else None
-                if alt_m2:
-                    title = alt_m2.group(1)
+            for title_pat in [
+                r'<div[^>]*title="([^"]*)"[^>]*>',
+                r'<a[^>]*title="([^"]*)"[^>]*>',
+            ]:
+                m = re.search(title_pat, nearby, re.S | re.I)
+                if m:
+                    title = m.group(1).strip()
+                    if title:
+                        break
+
             if not title:
-                txt_m = _TITLE_RE.search(inner)
-                if txt_m:
-                    title = txt_m.group(1).strip()
+                # 兜底: 从附近纯文本中提取一段看起来像标题的文字
+                txt_matches = re.findall(r'>([^<]{5,60})<', nearby)
+                for t in txt_matches:
+                    t = t.strip()
+                    if t and not t.startswith(('http', '<', 'div', 'span', 'img')):
+                        title = t
+                        break
+
             if not title:
                 title = "(无标题)"
 
             results.append({
-                "url": full_url,
+                "url": href,
                 "title": title,
                 "thumbnail_url": thumb,
                 "site": "hanime1.me",

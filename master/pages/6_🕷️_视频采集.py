@@ -88,10 +88,15 @@ if st.button("🚀 开始采集", type="primary", use_container_width=True):
             except Exception as e:
                 detail_logs.append(f"❌ {site}: 采集失败 — {e}")
 
-        st.success(f"采集完成！新增 {total_new} 条，去重跳过 {total_dup} 条")
+        if total_new == 0:
+            st.warning(f"本次采集 0 条新增，全部已存在（去重 {total_dup} 条）。如需新内容，可更换站点或等站点更新后再采。")
+        else:
+            st.success(f"采集完成！新增 {total_new} 条，去重跳过 {total_dup} 条")
         with st.expander("查看详细日志"):
             for line in detail_logs:
                 st.write(line)
+        import time
+        time.sleep(1)
         st.rerun()
 
 st.divider()
