@@ -135,8 +135,6 @@ def render_candidate_list(status: str):
                 st.markdown(f"**原标题:** {c.get('title') or '—'}")
                 # 一键打开链接
                 url = c['url']
-                st.markdown(f"**链接:** [{url[:60]}...]({url}) {{:target=\"_blank\"}}")
-                # Streamlit 的 markdown 不支持 target=_blank, 用 HTML
                 st.html(f'<a href="{url}" target="_blank" style="font-size:12px;color:#58a6ff;">🔗 在新标签页打开视频</a>')
 
                 # 可编辑的翻译文案

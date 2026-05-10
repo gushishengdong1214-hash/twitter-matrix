@@ -45,7 +45,11 @@ def crawl(limit: int = 10) -> list[dict]:
         except Exception:
             continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        # lxml 解析器对 HTML5 嵌套更友好,不会把 <a> 内部的 <div>/<img> 移出
+        try:
+            soup = BeautifulSoup(resp.text, "lxml")
+        except Exception:
+            soup = BeautifulSoup(resp.text, "html.parser")
 
         for a in soup.find_all("a", href=re.compile(r"^https://hanime1\.me/watch\?v=\d+")):
             if len(results) >= limit:

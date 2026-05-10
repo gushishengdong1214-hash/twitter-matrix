@@ -50,7 +50,10 @@ def crawl(limit: int = 10) -> list[dict]:
             except Exception:
                 break
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            try:
+                soup = BeautifulSoup(resp.text, "lxml")
+            except Exception:
+                soup = BeautifulSoup(resp.text, "html.parser")
             found_on_page = 0
 
             for a in soup.find_all("a", href=re.compile(r"/videos/[^/]+")):
