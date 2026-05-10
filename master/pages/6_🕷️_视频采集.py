@@ -52,20 +52,20 @@ if st.button("🚀 开始采集", type="primary", use_container_width=True):
     else:
         total_new = 0
         total_dup = 0
-        progress = st.progress(0, text="准备采集...")
+        detail_logs = []
 
         for idx, site in enumerate(selected_sites):
-            progress.progress(
-                (idx) / len(selected_sites),
-                text=f"正在采集 {site}..."
-            )
+            st.write(f"⏳ 正在采集 {site} ...")
             try:
                 items = crawl_site(site, limit=limit_per_site)
+                site_new = 0
+                site_dup = 0
                 for item in items:
                     url = item["url"]
                     url_hash = hashlib.md5(url.encode()).hexdigest()
                     if db.is_url_crawled(url_hash):
                         total_dup += 1
+                        site_dup += 1
                         continue
 
                     title = item.get("title", "")
@@ -82,17 +82,28 @@ if st.button("🚀 开始采集", type="primary", use_container_width=True):
                         thumbnail_url=thumb,
                     )
                     total_new += 1
-            except Exception as e:
-                st.error(f"{site} 采集失败: {e}")
+                    site_new += 1
 
-        progress.progress(1.0, text="采集完成")
+                detail_logs.append(f"✅ {site}: 抓到 {len(items)} 条, 新增 {site_new} 条, 去重 {site_dup} 条")
+            except Exception as e:
+                detail_logs.append(f"❌ {site}: 采集失败 — {e}")
+
         st.success(f"采集完成！新增 {total_new} 条，去重跳过 {total_dup} 条")
+        with st.expander("查看详细日志"):
+            for line in detail_logs:
+                st.write(line)
         st.rerun()
 
 st.divider()
 
 # ========== 候选池 ==========
 st.subheader("📋 候选池（人工审查）")
+
+# 统计
+cnt_pending = len(db.list_crawled_videos(status="pending", limit=9999))
+cnt_approved = len(db.list_crawled_videos(status="approved", limit=9999))
+cnt_rejected = len(db.list_crawled_videos(status="rejected", limit=9999))
+st.caption(f"待审查 {cnt_pending} | 已通过 {cnt_approved} | 已拒绝 {cnt_rejected}")
 
 tab_pending, tab_approved, tab_rejected = st.tabs(["⏳ 待审查", "✅ 已通过", "❌ 已拒绝"])
 
@@ -117,7 +128,11 @@ def render_candidate_list(status: str):
 
             with cols[1]:
                 st.markdown(f"**原标题:** {c.get('title') or '—'}")
-                st.markdown(f"**链接:** `{c['url'][:80]}...`")
+                # 一键打开链接
+                url = c['url']
+                st.markdown(f"**链接:** [{url[:60]}...]({url}) {{:target=\"_blank\"}}")
+                # Streamlit 的 markdown 不支持 target=_blank, 用 HTML
+                st.html(f'<a href="{url}" target="_blank" style="font-size:12px;color:#58a6ff;">🔗 在新标签页打开视频</a>')
 
                 # 可编辑的翻译文案
                 edited_key = f"edit_cap_{c['id']}"
