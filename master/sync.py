@@ -77,16 +77,49 @@ def push_config(worker: dict) -> None:
 
 
 def push_tasks(worker: dict, tasks: list[dict]) -> None:
+    """推送任务列表到 worker，与 worker 本地 tasks.json 合并而非覆盖。
+
+    合并策略：
+    - worker 已标记为终态（done / failed / human_required）的任务，保留 worker 版本
+    - 其余任务以中控版本为准（scheduled / running / pending）
+    - worker 本地有但中控未推送的终态历史任务，保留在文件里
+    """
+    # 1) 先拉取 worker 当前 tasks.json
+    remote_tasks = []
+    try:
+        with SSHClient(**_creds(worker)) as ssh:
+            remote_text = ssh.get_text(f"{WORKER_REMOTE_DIR}/tasks.json")
+            if remote_text:
+                remote_tasks = json.loads(remote_text)
+    except Exception:
+        remote_tasks = []
+
+    remote_by_id = {t["id"]: t for t in remote_tasks if "id" in t}
+    local_ids = {t["id"] for t in tasks}
+    FINAL_STATUSES = {"done", "failed", "human_required"}
+
     payload = []
     for t in tasks:
-        payload.append({
-            "id": t["id"],
-            "video_url": t["video_url"],
-            "caption": t["caption"],
-            "status": t.get("status", "scheduled"),
-            "scheduled_at": t.get("scheduled_at"),
-            "attempt": t.get("attempt", 0),
-        })
+        tid = t["id"]
+        rt = remote_by_id.get(tid)
+        # worker 已跑到终态 → 绝不覆盖，保留 worker 的 done/failed/human_required
+        if rt and rt.get("status") in FINAL_STATUSES:
+            payload.append(rt)
+        else:
+            payload.append({
+                "id": tid,
+                "video_url": t["video_url"],
+                "caption": t["caption"],
+                "status": t.get("status", "scheduled"),
+                "scheduled_at": t.get("scheduled_at"),
+                "attempt": t.get("attempt", 0),
+            })
+
+    # 保留 worker 本地有但中控本次不推的终态历史任务，避免丢失记录
+    for rt in remote_tasks:
+        if rt.get("id") not in local_ids and rt.get("status") in FINAL_STATUSES:
+            payload.append(rt)
+
     with SSHClient(**_creds(worker)) as ssh:
         ssh.put_text(json.dumps(payload, ensure_ascii=False, indent=2),
                      f"{WORKER_REMOTE_DIR}/tasks.json")
