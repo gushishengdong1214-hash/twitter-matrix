@@ -1,7 +1,9 @@
 """hanime1.me 视频采集器。
 
-策略:用正则找到所有 <a href="https://hanime1.me/watch?v=xxx"> 的精确位置,
-对每个匹配取附近 HTML 提取缩略图(img src)和标题(div title / a title / img alt)。
+策略:逐个匹配 <a href="https://hanime1.me/watch?v=xxx"> 的精确位置,
+缩略图只在 <a> 开始后 500 字符内的 <img> 里找,
+标题只在 <a> 开始前 500 字符内的 <div title> 里找,
+避免和页面其他区域的 img/div 混淆。
 """
 import re
 from urllib.parse import urljoin
@@ -17,7 +19,6 @@ LIST_URLS = [
     "https://hanime1.me/search?sort=%E6%9C%80%E8%BF%91%E6%9B%B4%E6%96%B0",
 ]
 
-# 匹配 <a href="https://hanime1.me/watch?v=数字" ...>
 _A_RE = re.compile(
     r'<a\s+[^>]*href="(https://hanime1\.me/watch\?v=\d+)"[^>]*>',
     re.S | re.I,
@@ -60,49 +61,34 @@ def crawl(limit: int = 10) -> list[dict]:
                 continue
             seen_urls.add(href)
 
-            # 取匹配位置前后 1000 字符
-            start = max(0, m.start() - 1000)
-            end = min(len(html), m.end() + 1000)
-            nearby = html[start:end]
-
-            # 缩略图: 优先 vdownload.hembed.com, 其次任何 src
+            # --- 缩略图:只在 <a> 开始后 500 字符内的 <img> 里找 ---
             thumb = ""
-            for pat in [
-                r'src="(https://vdownload\.hembed\.com[^"]*)"',
-                r'src="([^"]*thumbnail[^"]*)"',
-                r'src="([^"]+\.(?:jpg|jpeg|png|webp))"',
-                r'data-src="([^"]*)"',
-            ]:
-                mm = re.search(pat, nearby, re.S | re.I)
+            img_area = html[m.end():m.end() + 500]
+            mm = re.search(r'<img[^>]*src="([^"]*)"[^>]*>', img_area, re.S | re.I)
+            if mm:
+                thumb = mm.group(1).strip()
+            if not thumb:
+                mm = re.search(r'<img[^>]*data-src="([^"]*)"[^>]*>', img_area, re.S | re.I)
                 if mm:
-                    thumb = mm.group(1)
-                    break
-
+                    thumb = mm.group(1).strip()
             if thumb and not thumb.startswith("http"):
                 thumb = urljoin(BASE_URL, thumb)
 
-            # 标题: 优先 div title / a title, 其次 img alt, 最后附近文本
+            # --- 标题:只在 <a> 开始前 500 字符内的 div title 里找 ---
             title = ""
-            for pat in [
-                r'<div[^>]*title="([^"]*)"[^>]*>',
-                r'<a[^>]*title="([^"]*)"[^>]*>',
-                r'alt="([^"]*)"',
-            ]:
-                mm = re.search(pat, nearby, re.S | re.I)
+            title_area = html[max(0, m.start() - 500):m.start()]
+            mm = re.search(r'<div[^>]*title="([^"]*)"', title_area, re.S | re.I)
+            if mm:
+                t = mm.group(1).strip()
+                if len(t) > 1:
+                    title = t
+            if not title:
+                # 兜底:在 <a> 内部找 img alt
+                mm = re.search(r'alt="([^"]*)"', img_area, re.S | re.I)
                 if mm:
                     t = mm.group(1).strip()
-                    if t and len(t) > 2:
+                    if len(t) > 1:
                         title = t
-                        break
-
-            if not title:
-                txt = re.findall(r'>([^<]{5,60})<', nearby)
-                for t in txt:
-                    t = t.strip()
-                    if t and not t.startswith(('http', '<', 'div', 'span', 'img', 'script')):
-                        title = t
-                        break
-
             if not title:
                 title = "(无标题)"
 

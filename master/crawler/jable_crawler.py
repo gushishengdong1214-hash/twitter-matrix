@@ -1,6 +1,8 @@
 """jable.tv 视频采集器。
 
-策略:请求列表页,用正则找到所有视频链接的精确位置,取附近 HTML 提取缩略图和标题。
+策略:逐个匹配 <a href=".../videos/..."> 的精确位置,
+缩略图和标题只在 <a> 开始后 500 字符内的 <img> 里找,
+避免和页面其他区域的 img 混淆。
 """
 import re
 from urllib.parse import urljoin
@@ -17,7 +19,6 @@ LIST_URLS = [
     "https://jable.tv/categories/uncensored/",
 ]
 
-# 匹配 <a href=".../videos/..."> 的精确位置
 _A_RE = re.compile(
     r'<a\s+[^>]*href="([^"]*videos/[^"]*)"[^>]*>',
     re.S | re.I,
@@ -63,48 +64,36 @@ def crawl(limit: int = 10) -> list[dict]:
                 href = m.group(1)
                 full_url = urljoin(BASE_URL, href)
 
-                # 过滤:确保是视频页面链接(有 slug),排除分类/标签页
+                # 过滤:确保是视频页面链接
                 if not re.search(r'/videos/[^/]+', full_url):
                     continue
-                # 排除明显的非视频路径
                 if any(k in full_url.lower() for k in ['categories', 'tags', 'actors', 'series']):
                     continue
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
 
-                # 取匹配位置附近 800 字符
-                start = max(0, m.start() - 800)
-                end = min(len(html), m.end() + 800)
-                nearby = html[start:end]
-
-                # 缩略图
+                # --- 缩略图和标题:只在 <a> 开始后 500 字符内的 <img> 里找 ---
                 thumb = ""
-                for pat in [
-                    r'src="(https://[^"]*cdn[^"]*)"',
-                    r'src="([^"]*\.(?:jpg|jpeg|png|webp))"',
-                    r'data-src="([^"]*)"',
-                ]:
-                    mm = re.search(pat, nearby, re.S | re.I)
+                title = ""
+                inner_area = html[m.end():m.end() + 500]
+
+                mm = re.search(r'<img[^>]*src="([^"]*)"[^>]*>', inner_area, re.S | re.I)
+                if mm:
+                    thumb = mm.group(1).strip()
+                if not thumb:
+                    mm = re.search(r'<img[^>]*data-src="([^"]*)"[^>]*>', inner_area, re.S | re.I)
                     if mm:
-                        thumb = mm.group(1)
-                        break
+                        thumb = mm.group(1).strip()
+
+                mm = re.search(r'alt="([^"]*)"', inner_area, re.S | re.I)
+                if mm:
+                    t = mm.group(1).strip()
+                    if len(t) > 1:
+                        title = t
 
                 if thumb and not thumb.startswith("http"):
                     thumb = urljoin(BASE_URL, thumb)
-
-                # 标题: 优先 img alt, 其次附近文本
-                title = ""
-                mm = re.search(r'alt="([^"]*)"', nearby, re.S | re.I)
-                if mm:
-                    title = mm.group(1).strip()
-                if not title:
-                    txt = re.findall(r'>([^<]{5,60})<', nearby)
-                    for t in txt:
-                        t = t.strip()
-                        if t and not t.startswith(('http', '<', 'div', 'span', 'img', 'script')):
-                            title = t
-                            break
                 if not title:
                     title = "(无标题)"
 
