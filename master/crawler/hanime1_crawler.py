@@ -1,7 +1,8 @@
 """hanime1.me 视频采集器。
 
-从首页抓取视频卡片,提取 URL + 标题 + 缩略图。
+从首页/分类页抓取视频卡片,提取 URL + 标题 + 缩略图。
 """
+import re
 from urllib.parse import urljoin
 
 try:
@@ -15,7 +16,10 @@ except Exception:
     BeautifulSoup = None
 
 BASE_URL = "https://hanime1.me"
-LIST_URL = "https://hanime1.me/"
+LIST_URLS = [
+    "https://hanime1.me/",
+    "https://hanime1.me/search?sort=最近更新",
+]
 
 
 def crawl(limit: int = 10) -> list[dict]:
@@ -35,76 +39,89 @@ def crawl(limit: int = 10) -> list[dict]:
     }
 
     results = []
-    page = 1
-    while len(results) < limit and page <= 10:
-        url = f"{LIST_URL}?page={page}" if page > 1 else LIST_URL
+
+    for list_url in LIST_URLS:
+        if len(results) >= limit:
+            break
         try:
-            resp = curl_requests.get(url, headers=headers, impersonate="chrome124", timeout=30)
+            resp = curl_requests.get(list_url, headers=headers, impersonate="chrome124", timeout=30)
             resp.raise_for_status()
         except Exception as e:
-            raise RuntimeError(f"请求 hanime1.me 失败: {e}")
+            continue
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # hanime1 常见卡片选择器
-        cards = (
-            soup.select(".home-rows-videos-wrapper > a")
-            or soup.select(".video-item")
-            or soup.select(".card")
-            or soup.select("a[href^='/watch']")
-        )
+        # 策略1: 找所有 /watch?v= 链接
+        watch_links = soup.find_all("a", href=re.compile(r"^/watch\?v="))
+        if watch_links:
+            for a in watch_links:
+                if len(results) >= limit:
+                    break
+                try:
+                    item = _parse_from_a_tag(a)
+                    if item:
+                        results.append(item)
+                except Exception:
+                    continue
 
-        for card in cards:
-            if len(results) >= limit:
-                break
-            try:
-                item = _parse_card(card)
-                if item and item.get("url"):
-                    results.append(item)
-            except Exception:
-                continue
-
-        page += 1
-        if not cards:
-            break
+        # 策略2: 如果策略1没抓到,尝试常见卡片容器
+        if not results:
+            cards = (
+                soup.select(".video-item")
+                or soup.select(".content-item")
+                or soup.select(".video-card")
+                or soup.select(".card")
+            )
+            for card in cards:
+                if len(results) >= limit:
+                    break
+                try:
+                    item = _parse_card_container(card)
+                    if item:
+                        results.append(item)
+                except Exception:
+                    continue
 
     return results
 
 
-def _parse_card(card) -> dict | None:
-    """解析单个视频卡片。"""
-    # card 可能是 <a> 标签本身,也可能是包含 <a> 的容器
-    a = card if card.name == "a" else card.find("a", href=True)
-    if not a:
-        return None
-
+def _parse_from_a_tag(a) -> dict | None:
+    """从 <a href='/watch?v=xxx'> 标签及周围提取信息。"""
     href = a.get("href", "")
     if not href.startswith("http"):
         href = urljoin(BASE_URL, href)
-    if "/watch" not in href:
-        return None
 
-    # 标题:可能直接是 <a> 的 title,或内部 img 的 alt,或 nearby text
+    # 标题: 优先 <a> 的 title,其次内部 img 的 alt
     title = a.get("title", "")
-    if not title:
-        img = a.find("img")
-        if img:
-            title = img.get("alt", "")
-    if not title:
-        # 尝试附近文本
-        for sel in [".video-title", "h3", "h4", ".title"]:
-            el = a.select_one(sel) if hasattr(a, "select_one") else None
-            if el:
-                title = el.get_text(strip=True)
-                break
-
-    # 缩略图
     thumb = ""
-    img = a.find("img") if hasattr(a, "find") else None
+
+    img = a.find("img")
     if img:
+        if not title:
+            title = img.get("alt", "")
         thumb = img.get("data-src") or img.get("data-original") or img.get("src", "")
         if thumb and not thumb.startswith("http"):
             thumb = urljoin(BASE_URL, thumb)
+
+    # 如果 <a> 里没 img,可能是文字链接,尝试附近找图
+    if not thumb:
+        parent = a.find_parent()
+        if parent:
+            img2 = parent.find("img")
+            if img2:
+                thumb = img2.get("data-src") or img2.get("data-original") or img2.get("src", "")
+                if thumb and not thumb.startswith("http"):
+                    thumb = urljoin(BASE_URL, thumb)
+            # 标题也可能在兄弟元素里
+            if not title:
+                for sel in [".title", ".video-title", "h3", "h4", "h5", ".name"]:
+                    el = parent.select_one(sel)
+                    if el:
+                        title = el.get_text(strip=True)
+                        break
+
+    if not title:
+        title = "(无标题)"
 
     return {
         "url": href,
@@ -112,3 +129,11 @@ def _parse_card(card) -> dict | None:
         "thumbnail_url": thumb,
         "site": "hanime1.me",
     }
+
+
+def _parse_card_container(card) -> dict | None:
+    """从卡片容器解析。"""
+    a = card.find("a", href=re.compile(r"/watch\?v="))
+    if not a:
+        return None
+    return _parse_from_a_tag(a)
