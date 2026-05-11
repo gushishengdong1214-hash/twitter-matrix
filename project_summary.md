@@ -108,7 +108,23 @@ V3 矩阵架构(master + worker)代码已经写了大半,worker1 跑通过一次
 - 性能:只在有新告警时调一次 `pull_screenshots`,避免每次同步都拖文件
 - 兜底:即使 worker 重启清了 state,只要 task 状态还在,master 下次同步会补上 alert
 
-**Why:** 用户测试 worker1 时,任务 ID 4 跑出 human_required 但告警页空,无法处理。第 11 轮子 agent 已经定位根因,这一轮把修复落地。同时趁等 ID 5 跑(45 分钟空档)把用户长期想要的"UI 显示北京时间"做了,VPS 时间存储不动,UI 转 +8。
+### 第 15 轮 — 嗅探时触发 video.play() + 无条件 impersonate
+
+ID 5 跑 hanime1 v=432 失败:嗅到的 m3u8 只有 5 个 segment(几乎肯定是预览),且 yt-dlp 下载 saawsedge.com 时 403 Forbidden。两层 bug。
+
+**`worker/tweet_engine.py` `_sniff_m3u8`**:
+- 在 page.goto 后,先 `wait 5 秒`(等播放器脚本挂载)
+- 然后 `page.evaluate` 调 `video.muted=true` + `video.play()` — 触发主视频 m3u8 请求(jable / hanime1 的主视频 m3u8 不会在 page load 时 prefetch,要点 play 才会)
+- 兜底:点常见 play 按钮选择器(`.vjs-big-play-button`、`.plyr__control--overlaid`、`.jw-icon-display`、`button[aria-label*='play']` 等)
+- 再 `wait 15 秒`让主视频 m3u8 加载完
+- 总嗅探时间 8 秒 → 20 秒(慢了点但能拿到主视频)
+
+**`worker/tweet_engine.py` `download_video`**:
+- impersonate 从"只在 fallback 路径设"改成"**无条件设**"
+- 旧版只在嗅不到 m3u8 用原 URL 时才带 Chrome 指纹。但 hanime1 的 m3u8 在 saawsedge.com / Cloudflare 后面,**下 segments 也要 Chrome 指纹**,否则 403
+- 改成无条件设 chrome-124
+
+**Why:** 之前以为只是嗅错 m3u8 选了预览(Bug B),实际是**根本嗅不到主视频**。主视频 m3u8 是 lazy load,要点 play 触发。jable ID 4 之前嗅到 308 segment,那很可能也是扩展预览(几分钟),不是正片(30-90 分钟,几百几千 segment)。所以"货不对板"问题其实**比之前以为的更严重** — 之前用户测试中"已完成"的任务推上 X 的视频很可能一直都是预览。
 
 **`worker/worker.py`:**
 - `VIDEO_TEMP`(固定路径)→ 删除

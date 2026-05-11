@@ -101,7 +101,48 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
             )
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(8000)
+                # 第一步:等 DOM + 播放器脚本加载
+                page.wait_for_timeout(5000)
+
+                # 第二步:程序化触发主视频加载
+                # jable.tv / hanime1.me 这类站不会在 page load 时 prefetch 主视频 m3u8,
+                # 主视频请求只在用户点 play 时才触发。必须程序化调 video.play() 才能嗅到。
+                # muted=true 用于绕过 Chrome autoplay policy(无声播放允许)。
+                try:
+                    page.evaluate(
+                        """() => {
+                            document.querySelectorAll('video').forEach(v => {
+                                try { v.muted = true; } catch (e) {}
+                                try { v.play().catch(() => {}); } catch (e) {}
+                            });
+                        }"""
+                    )
+                    log("已触发 video.play() 让主视频开始加载")
+                except Exception as e:
+                    log(f"触发 play 失败:{e}")
+
+                # 兜底:点常见的 play 按钮(部分播放器需要 user gesture 才解锁 video element)
+                try:
+                    for sel in [
+                        ".vjs-big-play-button",
+                        ".plyr__control--overlaid",
+                        ".jw-icon-display",
+                        "button[aria-label*='play' i]",
+                        ".play-btn", ".btn-play",
+                    ]:
+                        loc = page.locator(sel).first
+                        try:
+                            if loc.is_visible(timeout=500):
+                                loc.click(timeout=1500)
+                                log(f"点了 play 按钮:{sel}")
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                # 第三步:等 m3u8 请求被发出(主视频 m3u8 通常在 play 触发后 1-10 秒出现)
+                page.wait_for_timeout(15000)
 
                 # 主策略:DOM 里找主 video 元素的 m3u8 src
                 try:
@@ -207,13 +248,13 @@ def download_video(
             "Referer": url,
         },
     }
-    # 只在 fallback(嗅不到 m3u8,直接下原 URL)时启用 impersonate 过 Cloudflare;
-    # 嗅到 m3u8 后下 segments 是无状态的,不需要 impersonate(且会因为版本名问题报错)
-    if real_url == url:
-        try:
-            ydl_opts["impersonate"] = "chrome-124"
-        except Exception:
-            pass
+    # impersonate 用于绕过 Cloudflare / 防盗链 CDN(saawsedge.com、mushroomtrack.com 等)
+    # 旧版只在 fallback(给 yt-dlp 原 URL)时设,但嗅到的 m3u8 走 saawsedge 这种 CDN
+    # 也会 403。改成无条件设。
+    try:
+        ydl_opts["impersonate"] = "chrome-124"
+    except Exception:
+        pass
     if yt_proxy_url:
         ydl_opts["proxy"] = yt_proxy_url
 
