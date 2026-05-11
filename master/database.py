@@ -270,8 +270,8 @@ def delete_tasks(ids: list[int]) -> int:
         return 0
     placeholders = ",".join("?" * len(ids))
     with get_conn() as c:
-        c.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", ids)
-        return c.rowcount
+        cur = c.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", ids)
+        return cur.rowcount
 
 
 def delete_tasks_by_status(worker_id: int, status: Optional[str] = None) -> int:
@@ -280,10 +280,10 @@ def delete_tasks_by_status(worker_id: int, status: Optional[str] = None) -> int:
     """
     with get_conn() as c:
         if status is not None:
-            c.execute("DELETE FROM tasks WHERE worker_id = ? AND status = ?", (worker_id, status))
+            cur = c.execute("DELETE FROM tasks WHERE worker_id = ? AND status = ?", (worker_id, status))
         else:
-            c.execute("DELETE FROM tasks WHERE worker_id = ?", (worker_id,))
-        return c.rowcount
+            cur = c.execute("DELETE FROM tasks WHERE worker_id = ?", (worker_id,))
+        return cur.rowcount
 
 
 def task_counts_by_worker() -> dict[int, dict[str, int]]:
