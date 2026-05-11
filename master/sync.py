@@ -255,9 +255,14 @@ def sync_worker(worker: dict) -> dict:
                     html_snapshot_path="",
                 )
 
-    # 同步任务状态变化
+    # 同步任务状态变化 + 兜底创建告警
+    # 设计:alert 创建以 task 状态为准(不再依赖 state.status),
+    # 因为 worker 重启会清掉 state 但 tasks.json 是持久化的 — 之前的
+    # 实现把 alert 创建绑在 state.status 上,会漏掉 worker 重启后
+    # state=idle 但 task=human_required 的场景。
     try:
         remote_tasks = pull_tasks_status(worker)
+        new_alerts_to_create: list[dict] = []
         for rt in remote_tasks:
             tid = rt.get("id")
             if not tid:
@@ -268,6 +273,36 @@ def sync_worker(worker: dict) -> dict:
                     fields[k] = rt[k]
             if fields:
                 db.update_task(tid, **fields)
+            if rt.get("status") == "human_required":
+                with db.get_conn() as c:
+                    existed = c.execute(
+                        "SELECT id FROM alerts WHERE worker_id = ? AND task_id = ? AND resolved = 0",
+                        (worker["id"], tid),
+                    ).fetchone()
+                if not existed:
+                    new_alerts_to_create.append(rt)
+
+        if new_alerts_to_create:
+            # 有新告警才拉一次截图,避免每次同步都拖
+            try:
+                pull_screenshots(worker)
+            except Exception:
+                pass
+            for rt in new_alerts_to_create:
+                shot_path = rt.get("screenshot_path") or ""
+                local_shot = ""
+                if shot_path:
+                    local_shot = str(
+                        SCREENSHOT_LOCAL_DIR / f"w{worker['id']}_{Path(shot_path).name}"
+                    )
+                db.add_alert(
+                    worker_id=worker["id"],
+                    task_id=rt.get("id"),
+                    type_="popup_unknown",
+                    message=rt.get("error_message", "") or "task 状态为 human_required",
+                    screenshot_path=local_shot,
+                    html_snapshot_path="",
+                )
     except Exception as e:
         db.add_log(worker["id"], None, "WARN", f"同步任务状态失败:{e}")
 
