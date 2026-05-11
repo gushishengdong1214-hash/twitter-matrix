@@ -248,13 +248,17 @@ def download_video(
             "Referer": url,
         },
     }
-    # impersonate 用于绕过 Cloudflare / 防盗链 CDN(saawsedge.com、mushroomtrack.com 等)
-    # 旧版只在 fallback(给 yt-dlp 原 URL)时设,但嗅到的 m3u8 走 saawsedge 这种 CDN
-    # 也会 403。改成无条件设。
-    try:
-        ydl_opts["impersonate"] = "chrome-124"
-    except Exception:
-        pass
+    # yt-dlp 在 worker VPS 上可能没有 curl_cffi impersonate 插件。
+    # 只在 fallback(给 yt-dlp 原 URL 直接下载)时设 impersonate,因为:
+    #   - 嗅到 m3u8 后 yt-dlp 下 segments 通常不需要(绝大多数站点直接下就行)
+    #   - 否则 worker 上 yt-dlp 不支持 chrome-124 会直接报错(Impersonate target not available)
+    # hanime1 的 m3u8 下载如遇 403,需在 worker VPS 升级 yt-dlp + curl_cffi:
+    #     pip install -U yt-dlp curl_cffi
+    if real_url == url:
+        try:
+            ydl_opts["impersonate"] = "chrome-124"
+        except Exception:
+            pass
     if yt_proxy_url:
         ydl_opts["proxy"] = yt_proxy_url
 
