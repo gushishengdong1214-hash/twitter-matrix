@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import database as db
 import sync as syn
 from ssh_client import test_connection
+from timezone_utils import to_beijing
 
 st.set_page_config(page_title="Workers", page_icon="💻", layout="wide")
 st.title("💻 Workers (VPS 节点)")
@@ -350,7 +351,8 @@ else:
                 st.progress(min(1.0, pct / 100))
             with cols[2]:
                 st.markdown(f"`{zh_worker_status(w['status'])}`")
-                st.caption(w.get("last_heartbeat") or "未上线")
+                hb = w.get("last_heartbeat")
+                st.caption(to_beijing(hb) + " (北京)" if hb else "未上线")
 
             b1, b2, b3, b4, b5, b6, b7, b8 = st.columns(8)
 

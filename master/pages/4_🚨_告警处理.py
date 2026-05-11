@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import database as db
 import sync as syn
+from timezone_utils import to_beijing
 
 st.set_page_config(page_title="告警", page_icon="🚨", layout="wide")
 st.title("🚨 告警 / 人工处理队列")
@@ -37,7 +38,7 @@ else:
                     f"**{a.get('worker_nickname', '?')}** &nbsp; "
                     f"类型 `{zh_alert_type(a.get('type'))}` &nbsp; 任务 ID {a.get('task_id') or '-'}"
                 )
-                st.caption(f"上报时间:{a['created_at']}")
+                st.caption(f"上报时间(北京):{to_beijing(a['created_at'])}")
                 if a.get("message"):
                     st.write(a["message"])
                 shot = a.get("screenshot_path")

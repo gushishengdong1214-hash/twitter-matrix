@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import database as db
+from timezone_utils import to_beijing
 
 st.set_page_config(page_title="运行日志", page_icon="📜", layout="wide")
 st.title("📜 运行日志")
@@ -28,8 +29,9 @@ logs = db.list_logs(worker_id=worker_id, limit=limit)
 
 if logs:
     df = pd.DataFrame(logs)[["created_at", "worker_nickname", "level", "message"]]
+    df["created_at"] = df["created_at"].apply(to_beijing)
     df.rename(columns={
-        "created_at": "时间",
+        "created_at": "时间(北京)",
         "worker_nickname": "Worker",
         "level": "级别",
         "message": "内容",

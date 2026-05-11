@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import database as db
 from datetime import datetime
+from timezone_utils import to_beijing
 
 st.set_page_config(page_title="推特矩阵中控", page_icon="🐦", layout="wide")
 db.init_db()
@@ -76,7 +77,7 @@ else:
                 "pending": "⚪",
             }.get(status, "⚪")
             cols[2].markdown(f"{color} `{zh_worker_status(status)}`")
-            cols[2].caption(w.get("last_heartbeat") or "未上线")
+            cols[2].caption(to_beijing(w.get("last_heartbeat")) if w.get("last_heartbeat") else "未上线")
 
             t = counts.get(w["id"], {})
             cols[3].caption(

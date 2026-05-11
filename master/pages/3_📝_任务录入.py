@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import database as db
 import scheduler as sched
+from timezone_utils import to_beijing
 
 # ========== 状态中文映射 ==========
 _STATUS_MAP = {
@@ -117,15 +118,17 @@ if tasks:
          "scheduled_at", "started_at", "finished_at", "error_message"]
     ]
     df["status"] = df["status"].apply(zh_status)
+    for col in ("scheduled_at", "started_at", "finished_at"):
+        df[col] = df[col].apply(to_beijing)
     df.rename(columns={
         "id": "ID",
         "status": "状态",
         "video_url": "视频链接",
         "caption": "推文文案",
         "attempt": "尝试次数",
-        "scheduled_at": "排期时间",
-        "started_at": "开始时间",
-        "finished_at": "完成时间",
+        "scheduled_at": "排期时间(北京)",
+        "started_at": "开始时间(北京)",
+        "finished_at": "完成时间(北京)",
         "error_message": "错误信息",
     }, inplace=True)
     st.dataframe(df, use_container_width=True, hide_index=True, height=500)
