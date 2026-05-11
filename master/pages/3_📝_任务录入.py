@@ -132,5 +132,53 @@ if tasks:
         "error_message": "错误信息",
     }, inplace=True)
     st.dataframe(df, use_container_width=True, hide_index=True, height=500)
+
+    # ───────────────────────────────────────────
+    # 批量管理
+    # ───────────────────────────────────────────
+    st.divider()
+    st.subheader("批量管理")
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.markdown("**🧹 清空队列**")
+        clear_status_label = st.selectbox(
+            "清空状态",
+            ["全部"] + list(_STATUS_MAP.values()),
+            key=f"clear_status_{worker_id}",
+        )
+        clear_status_key = None if clear_status_label == "全部" else _STATUS_REVERSE.get(clear_status_label)
+        count = sum(1 for t in tasks if (clear_status_key is None or t.get("status") == clear_status_key))
+        st.caption(f"当前该 Worker 此状态下共 {count} 条任务")
+        if st.button("🧹 清空队列", key=f"btn_clear_{worker_id}", type="secondary"):
+            if count == 0:
+                st.warning("没有任务可清空")
+            else:
+                deleted = db.delete_tasks_by_status(worker_id, clear_status_key)
+                st.success(f"已删除 {deleted} 条任务")
+                st.rerun()
+
+    with col2:
+        st.markdown("**🗑️ 批量删除**")
+        task_options = {
+            t["id"]: f"ID:{t['id']} [{zh_status(t['status'])}] {t['video_url'][:50]}..."
+            for t in tasks
+        }
+        selected_ids = st.multiselect(
+            "选择要删除的任务",
+            options=list(task_options.keys()),
+            format_func=lambda x: task_options[x],
+            key=f"batch_del_{worker_id}",
+        )
+        if selected_ids:
+            st.caption(f"已选 {len(selected_ids)} 条")
+            if st.button("🗑️ 批量删除选中任务", key=f"btn_del_{worker_id}", type="primary"):
+                deleted = db.delete_tasks(selected_ids)
+                st.success(f"已删除 {deleted} 条任务")
+                st.rerun()
+        else:
+            st.caption("未选择任务")
+
 else:
     st.info("没有任务。")

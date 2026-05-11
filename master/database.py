@@ -264,6 +264,28 @@ def update_task(tid: int, **fields) -> None:
         c.execute(f"UPDATE tasks SET {cols} WHERE id = ?", (*fields.values(), tid))
 
 
+def delete_tasks(ids: list[int]) -> int:
+    """批量删除任务。返回实际删除条数。"""
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    with get_conn() as c:
+        c.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", ids)
+        return c.rowcount
+
+
+def delete_tasks_by_status(worker_id: int, status: Optional[str] = None) -> int:
+    """删除指定 Worker 下某状态的全部任务。status=None 时删除该 Worker 全部任务。
+    返回实际删除条数。
+    """
+    with get_conn() as c:
+        if status is not None:
+            c.execute("DELETE FROM tasks WHERE worker_id = ? AND status = ?", (worker_id, status))
+        else:
+            c.execute("DELETE FROM tasks WHERE worker_id = ?", (worker_id,))
+        return c.rowcount
+
+
 def task_counts_by_worker() -> dict[int, dict[str, int]]:
     with get_conn() as c:
         rows = c.execute("""

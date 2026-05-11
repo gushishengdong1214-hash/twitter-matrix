@@ -163,3 +163,109 @@ def test_connection(
                 f"底层 socket 测试也失败:{low_msg}\n"
                 f"→ 网络层 / 防火墙问题。先确认 VPS 22 端口对外开放且 sshd 在跑。"
             )
+
+
+def verify_v31_env(
+    host: str,
+    port: int = 22,
+    user: str = "root",
+    password: Optional[str] = None,
+    key_path: Optional[str] = None,
+) -> tuple[bool, list[dict]]:
+    """通过 SSH 逐一检查 Worker 的 V3.1 环境组件。
+
+    返回 (all_ok, list_of_checks)。每个 check 是 dict(name, ok, msg)。
+    all_ok=True 表示 SSH 连通且全部 V3.1 组件已装好。
+    """
+    checks: list[dict] = []
+    all_ok = True
+    try:
+        with SSHClient(host, port, user, password, key_path) as ssh:
+            # 1. ffmpeg / ffprobe
+            for name, cmd in (
+                ("ffmpeg", "ffmpeg -version | head -1"),
+                ("ffprobe", "ffprobe -version | head -1"),
+            ):
+                try:
+                    rc, out, _ = ssh.exec(cmd, timeout=10)
+                    if rc == 0 and out.strip():
+                        checks.append({"name": name, "ok": True, "msg": out.strip().splitlines()[0]})
+                    else:
+                        checks.append({"name": name, "ok": False, "msg": "未安装"})
+                        all_ok = False
+                except Exception as e:
+                    checks.append({"name": name, "ok": False, "msg": str(e)[:200]})
+                    all_ok = False
+
+            # 2. gost
+            try:
+                rc, out, _ = ssh.exec("/usr/local/bin/gost -V 2>&1", timeout=10)
+                if rc == 0 and out.strip():
+                    checks.append({"name": "gost 中继", "ok": True, "msg": out.strip()})
+                else:
+                    checks.append({"name": "gost 中继", "ok": False, "msg": "未安装 /usr/local/bin/gost"})
+                    all_ok = False
+            except Exception as e:
+                checks.append({"name": "gost 中继", "ok": False, "msg": str(e)[:200]})
+                all_ok = False
+
+            # 3. venv + V3.1 Python 库(一次导入,分列结果)
+            venv_python = "/opt/twitter-worker/venv/bin/python"
+            import_script = (
+                f"{venv_python} -c \"\"\""
+                "import sys\n"
+                "mods=['playwright','playwright_stealth','yt_dlp','curl_cffi','pyotp']\n"
+                "for m in mods:\n"
+                "    try:\n"
+                "        __import__(m)\n"
+                "        print(m+':OK')\n"
+                "    except Exception as e:\n"
+                "        print(m+':FAIL:'+str(e))\n"
+                "\"\"\""
+            )
+            try:
+                rc, out, _ = ssh.exec(import_script, timeout=30)
+                if rc == 0:
+                    for line in out.strip().splitlines():
+                        if ":" not in line:
+                            continue
+                        mod, status = line.split(":", 1)
+                        if status.startswith("OK"):
+                            checks.append({"name": mod, "ok": True, "msg": "导入 OK"})
+                        elif status.startswith("FAIL:"):
+                            checks.append({"name": mod, "ok": False, "msg": status[5:]})
+                            all_ok = False
+                        else:
+                            checks.append({"name": mod, "ok": True, "msg": status})
+                else:
+                    checks.append({
+                        "name": "venv Python", "ok": False,
+                        "msg": f"venv 不存在或 Python 失败: {out[:200]}"
+                    })
+                    all_ok = False
+            except Exception as e:
+                checks.append({"name": "venv Python", "ok": False, "msg": str(e)[:200]})
+                all_ok = False
+
+            # 4. chromium 浏览器缓存
+            try:
+                rc, out, _ = ssh.exec(
+                    "ls /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome 2>/dev/null | head -1",
+                    timeout=10,
+                )
+                if rc == 0 and out.strip():
+                    checks.append({"name": "Chromium 浏览器", "ok": True, "msg": "已缓存"})
+                else:
+                    checks.append({
+                        "name": "Chromium 浏览器", "ok": False,
+                        "msg": "未安装,请运行: /opt/twitter-worker/venv/bin/playwright install chromium",
+                    })
+                    all_ok = False
+            except Exception as e:
+                checks.append({"name": "Chromium 浏览器", "ok": False, "msg": str(e)[:200]})
+                all_ok = False
+
+    except Exception as e:
+        all_ok = False
+        checks.append({"name": "SSH 连接", "ok": False, "msg": str(e)[:200]})
+    return all_ok, checks

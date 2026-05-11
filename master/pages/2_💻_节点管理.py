@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import database as db
 import sync as syn
-from ssh_client import test_connection
+from ssh_client import test_connection, verify_v31_env
 from timezone_utils import to_beijing
 
 st.set_page_config(page_title="Workers", page_icon="💻", layout="wide")
@@ -465,15 +465,28 @@ else:
             b1, b2, b3, b4, b5, b6, b7, b8 = st.columns(8)
 
             if b1.button("🔌 测连接", key=f"test_{w['id']}"):
-                with st.spinner("..."):
+                with st.spinner("测试 SSH + 环境..."):
                     ok, info = test_connection(
                         host=w["vps_host"], port=w["ssh_port"], user=w["ssh_user"],
                         password=w.get("ssh_password"), key_path=w.get("ssh_key_path"),
                     )
-                    if ok:
-                        st.success(info[:300])
-                    else:
+                    if not ok:
                         st.error(info)
+                    else:
+                        env_ok, checks = verify_v31_env(
+                            host=w["vps_host"], port=w["ssh_port"], user=w["ssh_user"],
+                            password=w.get("ssh_password"), key_path=w.get("ssh_key_path"),
+                        )
+                        if env_ok:
+                            st.success("✅ V3.1 环境就绪")
+                            with st.expander("查看详细组件版本", expanded=False):
+                                for chk in checks:
+                                    st.markdown(f"✅ **{chk['name']}** — {chk['msg']}")
+                        else:
+                            st.error("⚠️ V3.1 环境不完整:")
+                            for chk in checks:
+                                icon = "✅" if chk["ok"] else "❌"
+                                st.markdown(f"{icon} **{chk['name']}** — {chk['msg']}")
 
             if b2.button("✏️ 编辑", key=f"edit_{w['id']}"):
                 st.session_state["editing_worker_id"] = w["id"]
