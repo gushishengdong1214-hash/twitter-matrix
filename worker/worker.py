@@ -37,6 +37,11 @@ def video_temp_for(task_id: int) -> Path:
     return VIDEO_TEMP_DIR / f"{VIDEO_TEMP_PREFIX}{task_id}.mp4"
 
 
+def video_compliant_for(task_id: int) -> Path:
+    """合规化后的视频路径(供 post_to_twitter 使用,与原始下载文件分离)。"""
+    return VIDEO_TEMP_DIR / f"{VIDEO_TEMP_PREFIX}{task_id}-compliant.mp4"
+
+
 def cleanup_all_video_temps():
     """清理 /tmp 下所有 worker 视频残留(防止 Bug A:残留文件被下一任务复用)。"""
     try:
@@ -174,14 +179,16 @@ def run_one_task(task: dict, config: dict):
     url = task["video_url"]
     caption = task["caption"]
     video_temp = video_temp_for(tid)
+    video_compliant = video_compliant_for(tid)
 
     # 任务开头强制清理同名残留(防 Bug A:上次任务的不完整文件被复用)
-    if video_temp.exists():
-        try:
-            video_temp.unlink()
-            log(f"清理任务 {tid} 同名残留")
-        except Exception:
-            pass
+    for p in (video_temp, video_compliant):
+        if p.exists():
+            try:
+                p.unlink()
+                log(f"清理任务 {tid} 残留 {p.name}")
+            except Exception:
+                pass
 
     log(f"=== 任务 {tid} 开始 === {url[:80]}")
     update_task_in_file(tid, status="running", started_at=_now_str(), attempt=task.get("attempt", 0) + 1)
@@ -193,20 +200,34 @@ def run_one_task(task: dict, config: dict):
     if not eng.download_video(url, video_temp, yt_proxy, pw_proxy, user_agent, log):
         log(f"任务 {tid} 下载失败")
         # 部分写入的文件也要清掉,防止下次复用
-        if video_temp.exists():
-            try:
-                video_temp.unlink()
-            except Exception:
-                pass
+        for p in (video_temp, video_compliant):
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message="download failed")
+        return
+
+    # 视频合规检查:超过 Twitter 限制(140s/512MB)的会被转码截断
+    if not eng.ensure_video_compliance(video_temp, video_compliant, log):
+        log(f"任务 {tid} 视频合规检查失败")
+        for p in (video_temp, video_compliant):
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        update_task_in_file(tid, status="failed", finished_at=_now_str(),
+                            error_message="compliance failed")
         return
 
     try:
         eng.post_to_twitter(
             config=config,
             caption=caption,
-            video_path=video_temp,
+            video_path=video_compliant,
             pw_proxy=pw_proxy,
             screenshot_dir=SCREENSHOT_DIR,
             log=log,
@@ -237,11 +258,12 @@ def run_one_task(task: dict, config: dict):
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message=str(e))
     finally:
-        if video_temp.exists():
-            try:
-                video_temp.unlink()
-            except Exception:
-                pass
+        for p in (video_temp, video_compliant):
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
 
 def reset_stale_running_tasks():

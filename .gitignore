@@ -20,6 +20,9 @@ worker/__pycache__/
 .idea/
 *.swp
 
+# Claude Code 本地设置(权限/工具记录,跟人/机器走,不入库)
+.claude/
+
 # 别意外把视频/截图传上去
 *.mp4
 *.png

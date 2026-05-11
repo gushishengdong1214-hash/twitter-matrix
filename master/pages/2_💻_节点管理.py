@@ -91,10 +91,116 @@ def _index_of(items: list, value, default: int = 0) -> int:
         return default
 
 
-def render_worker_form(proxies: list, worker: dict | None = None):
-    """渲染添加 / 编辑表单。worker=None 表示新增。"""
+def render_env_init_guide() -> bool:
+    """新增 Worker 前的环境初始化引导。返回 True 表示用户已确认 VPS 环境就绪。
+
+    展示 V3.1 必需的 7 步初始化命令,加一个强制勾选框。未勾选时下方表单不渲染。
+    """
+    st.markdown("### 🔧 环境初始化引导(V3.1)")
+    st.caption(
+        "**请在您的新 VPS 上以 root 权限依次运行以下命令,确保环境就绪后再填写下方信息。** "
+        "缺 ffmpeg/playwright-stealth 等 V3.1 必须组件,即使部署成功跑任务也一定爆 ban。"
+    )
+
+    with st.expander("📜 一键脚本(把这一行复制到 VPS root shell)", expanded=False):
+        st.code(
+            "# 方式 1:本地 scp\n"
+            "scp deploy/install_worker.sh root@<VPS>:/tmp/ && ssh root@<VPS> 'bash /tmp/install_worker.sh'\n\n"
+            "# 方式 2:VPS 上 curl 直拉(需要项目已 push 到公开仓库)\n"
+            "curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/install_worker.sh | bash",
+            language="bash",
+        )
+        st.caption("脚本内容就是下面 7 步的合集,内置 set -euo pipefail + 版本校验。")
+
+    st.markdown("**或按步骤手动执行(便于排错):**")
+
+    st.markdown("**第 1 步:系统更新**")
+    st.code("apt update && apt upgrade -y", language="bash")
+
+    st.markdown("**第 2 步:系统包(ffmpeg + Python + 工具链 + 中文字体 + vnstat)**")
+    st.code(
+        "apt install -y ffmpeg python3 python3-pip python3-venv "
+        "git curl wget vnstat fonts-noto-cjk",
+        language="bash",
+    )
+
+    st.markdown("**第 3 步:gost 中继(Chromium 不支持认证 SOCKS5)**")
+    st.code(
+        'GOST_VER=2.11.5\n'
+        'wget -q "https://github.com/ginuerzh/gost/releases/download/v${GOST_VER}/gost-linux-amd64-${GOST_VER}.gz" -O /tmp/gost.gz \\\n'
+        '  && gunzip -f /tmp/gost.gz \\\n'
+        '  && install -m 0755 /tmp/gost /usr/local/bin/gost \\\n'
+        '  && /usr/local/bin/gost -V',
+        language="bash",
+    )
+
+    st.markdown("**第 4 步:Worker 目录 + Python venv**")
+    st.code(
+        "mkdir -p /opt/twitter-worker\n"
+        "python3 -m venv /opt/twitter-worker/venv\n"
+        "/opt/twitter-worker/venv/bin/pip install --upgrade pip",
+        language="bash",
+    )
+
+    st.markdown("**第 5 步:V3.1 Python 依赖全集(含 playwright-stealth)**")
+    st.code(
+        "/opt/twitter-worker/venv/bin/pip install \\\n"
+        '  "playwright>=1.40" \\\n'
+        '  "playwright-stealth>=1.0.6" \\\n'
+        '  "yt-dlp>=2024.04.09" \\\n'
+        '  "PySocks>=1.7" \\\n'
+        '  "pyotp>=2.9" \\\n'
+        '  "curl-cffi>=0.7"',
+        language="bash",
+    )
+
+    st.markdown("**第 6 步:Playwright Chromium 浏览器 + 系统依赖**")
+    st.code(
+        "/opt/twitter-worker/venv/bin/playwright install --with-deps chromium",
+        language="bash",
+    )
+
+    st.markdown("**第 7 步:验证(全部回显才算通过)**")
+    st.code(
+        "ffmpeg -version | head -1\n"
+        "ffprobe -version | head -1\n"
+        "/usr/local/bin/gost -V\n"
+        "/opt/twitter-worker/venv/bin/python -c "
+        "\"import playwright, playwright_stealth, yt_dlp, pyotp, curl_cffi; print('python deps OK')\"\n"
+        "/opt/twitter-worker/venv/bin/python -c "
+        "\"from playwright.sync_api import sync_playwright; print('playwright sync OK')\"",
+        language="bash",
+    )
+
+    st.divider()
+    env_ready = st.checkbox(
+        "✅ 我已在该 VPS 上完成上述 7 步环境配置(ffmpeg / gost / venv / playwright-stealth / chromium 全部装好)",
+        key="env_init_confirmed",
+        help="未勾选时下方表单不渲染,防止跑歪。勾错可以再点一次取消。",
+    )
+    if not env_ready:
+        st.warning("⚠️ 请先在 VPS 上完成环境初始化,然后勾选确认。")
+    return env_ready
+
+
+def render_worker_form(proxies: list, worker: dict | None = None, env_ready: bool = True):
+    """渲染添加 / 编辑表单。worker=None 表示新增。
+
+    env_ready 仅对新增模式生效:False 时不渲染表单(展示一个占位提示)。
+    编辑模式 worker 已存在,默认通过。
+    """
     is_edit = worker is not None
     form_key = f"edit_worker_{worker['id']}" if is_edit else "add_worker"
+
+    # 新增表单强制环境就绪后才渲染
+    if not is_edit and not env_ready:
+        with st.container(border=True):
+            st.info("⬆️ 请先勾选「我已完成上述环境配置」,然后下方表单才会出现并可填。")
+            st.caption(
+                "未配置环境就提交,后续「🚀 部署」会因为 chromium/ffmpeg/gost 缺失整批失败,"
+                "得回头重跑。先把 VPS 跑出 ffmpeg/ffprobe/gost/playwright 后再来填。"
+            )
+        return
 
     proxy_ids = [p["id"] for p in proxies]
     default_proxy_index = (
@@ -321,7 +427,9 @@ if "editing_worker_id" in st.session_state:
     st.divider()
 else:
     with st.expander("➕ 添加 Worker", expanded=False):
-        render_worker_form(proxies)
+        env_ready = render_env_init_guide()
+        st.divider()
+        render_worker_form(proxies, env_ready=env_ready)
 
 
 st.subheader("现有 Workers")

@@ -2,6 +2,8 @@
 
 import json
 import random
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -10,11 +12,58 @@ from playwright.sync_api import sync_playwright
 
 import popup_handler as pop
 
+# playwright-stealth 用于补 navigator.plugins/languages/hardwareConcurrency/chrome/permissions/WebGL 等指纹
+# 装不上时降级为不打 stealth(WebRTC 屏蔽仍生效),不影响主流程
+try:
+    from playwright_stealth import stealth_sync as _stealth_sync
+    _HAS_STEALTH = True
+except ImportError:
+    _stealth_sync = None
+    _HAS_STEALTH = False
+
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
+
+# X 视频发布硬指标:140s / 512MB / H.264 + AAC / yuv420p
+TWITTER_DURATION_LIMIT_S = 140
+TWITTER_SIZE_LIMIT_BYTES = 512 * 1024 * 1024
+TWITTER_TARGET_BITRATE_K = 8000  # 8Mbps,稳在 25Mbps 上限内
+
+# Chromium 启动参数:WebRTC 屏蔽 + 隐藏自动化痕迹
+# WebRTC mode 3:UDP 走代理或丢弃(SOCKS5 转 UDP 在住宅链路上 99% 不通,等同丢弃)
+# 防止 X 通过 WebRTC STUN 看到 VPS 真 IP
+CHROMIUM_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process,WebRtcHideLocalIpsWithMdns",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+]
+
+# 注入到每个 page 的初始化脚本:隐藏 webdriver + 过滤 WebRTC ICE 服务器(belt + suspenders)
+_INIT_SCRIPT = """
+    // 1. 隐藏 webdriver
+    Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+
+    // 2. WebRTC ICE 服务器过滤(屏蔽 stun/turn,阻止 IP 候选生成)
+    if (window.RTCPeerConnection) {
+        const _RTCPC = window.RTCPeerConnection;
+        window.RTCPeerConnection = function(config, constraints) {
+            if (config && config.iceServers) {
+                config.iceServers = config.iceServers.filter(s => {
+                    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+                    return !urls.some(u => u && (u.startsWith('stun:') || u.startsWith('turn:')));
+                });
+            }
+            return new _RTCPC(config, constraints);
+        };
+        window.RTCPeerConnection.prototype = _RTCPC.prototype;
+    }
+    if (window.webkitRTCPeerConnection) {
+        window.webkitRTCPeerConnection = window.RTCPeerConnection;
+    }
+"""
 
 
 def _try_handle_twofa(page, twofa_secret: str, log) -> bool:
@@ -91,8 +140,9 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, proxy=pw_proxy)
+            browser = p.chromium.launch(headless=True, proxy=pw_proxy, args=CHROMIUM_LAUNCH_ARGS)
             context = browser.new_context(user_agent=user_agent)
+            context.add_init_script(_INIT_SCRIPT)
             page = context.new_page()
             captured: list[str] = []
             page.on(
@@ -272,6 +322,102 @@ def download_video(
         return False
 
 
+def ensure_video_compliance(in_path: Path, out_path: Path, log) -> bool:
+    """检查并转码视频以符合 Twitter 发布标准。
+
+    Twitter 规范:时长 <= 140s,大小 <= 512MB,H.264 + AAC,yuv420p。
+    超规视频取前 140s 转码为 H.264 720p / 8Mbps / AAC 128k。
+
+    返回 True 表示视频就绪(原视频符合 OR 转码成功)。
+    返回 False 表示无法处理(ffmpeg 不存在 / 转码失败 / 输出异常)。
+    """
+    if not in_path.exists():
+        log(f"压制:输入视频不存在 {in_path}")
+        return False
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        size = in_path.stat().st_size
+        if size <= TWITTER_SIZE_LIMIT_BYTES:
+            log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 在大小限内,直接采用(无法验证时长)")
+            if in_path != out_path:
+                shutil.copy(in_path, out_path)
+            return True
+        log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 超 512MB,放弃")
+        return False
+
+    # 探测时长 + 尺寸
+    try:
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-show_format", "-show_streams",
+             "-of", "json", str(in_path)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        info = json.loads(probe.stdout)
+        duration = float(info.get("format", {}).get("duration", 0))
+        size = int(info.get("format", {}).get("size", 0))
+    except Exception as e:
+        log(f"压制:ffprobe 探测失败 {e}")
+        return False
+
+    log(f"压制:原视频 {duration:.1f}s / {size/1024/1024:.1f}MB")
+
+    # 已合规:直接采用
+    if duration <= TWITTER_DURATION_LIMIT_S and size <= TWITTER_SIZE_LIMIT_BYTES:
+        log("压制:已符合 Twitter 标准,直接采用原视频")
+        if in_path != out_path:
+            shutil.copy(in_path, out_path)
+        return True
+
+    # 转码 + 必要时截断到前 140 秒
+    log(f"压制:超标(限制 {TWITTER_DURATION_LIMIT_S}s/512MB),开始转码")
+    cmd = [
+        ffmpeg, "-y",
+        "-i", str(in_path),
+        "-ss", "0",
+        "-t", str(TWITTER_DURATION_LIMIT_S),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-maxrate", f"{TWITTER_TARGET_BITRATE_K}k",
+        "-bufsize", f"{TWITTER_TARGET_BITRATE_K * 2}k",
+        "-vf", "scale='min(1280,iw)':'-2'",  # 等比缩到宽 <= 1280
+        "-pix_fmt", "yuv420p",                # X 要求 yuv420p
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "44100",
+        "-movflags", "+faststart",            # web 友好(meta 前置)
+        str(out_path),
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        log("压制:ffmpeg 超时(10min),放弃")
+        try:
+            out_path.unlink()
+        except FileNotFoundError:
+            pass
+        return False
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or "")[-500:]
+        log(f"压制:ffmpeg 失败 rc={e.returncode},stderr 末段:{tail}")
+        try:
+            out_path.unlink()
+        except FileNotFoundError:
+            pass
+        return False
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        log("压制:输出文件不存在或为空")
+        return False
+
+    new_size = out_path.stat().st_size
+    log(f"压制:完成,输出 {new_size/1024/1024:.1f}MB,截断至 {TWITTER_DURATION_LIMIT_S}s")
+    return True
+
+
 def post_to_twitter(
     config: dict,
     caption: str,
@@ -299,10 +445,7 @@ def post_to_twitter(
         browser = pw.chromium.launch(
             headless=True,
             proxy=pw_proxy,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
+            args=CHROMIUM_LAUNCH_ARGS,
         )
         context = browser.new_context(
             user_agent=user_agent,
@@ -310,13 +453,17 @@ def post_to_twitter(
             timezone_id=timezone_id,
             locale=locale,
         )
-        # 屏蔽 navigator.webdriver = true(playwright 自动化默认会暴露)
-        context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-        )
+        # WebRTC 屏蔽 + 隐藏 webdriver(详见模块顶部 _INIT_SCRIPT)
+        context.add_init_script(_INIT_SCRIPT)
         if cookies:
             context.add_cookies(cookies)
         page = context.new_page()
+        # playwright-stealth 补 navigator.plugins / languages / hardwareConcurrency / chrome / permissions / WebGL 等
+        if _HAS_STEALTH:
+            try:
+                _stealth_sync(page)
+            except Exception as e:
+                log(f"stealth_sync 失败:{e}")
         try:
             page.goto("https://x.com/compose/tweet", timeout=60_000)
             log("已打开发推页面")
