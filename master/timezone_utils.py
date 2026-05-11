@@ -35,4 +35,4 @@ def to_beijing(ts_str) -> str:
         return s
     dt_utc = dt_local - timedelta(seconds=_local_offset_seconds())
     dt_beijing = dt_utc + timedelta(seconds=_BEIJING_OFFSET_SEC)
-    return dt_beijing.strftime('%Y-%m-%d %H:%M:%S')
+    return dt_beijing.strftime('%Y-%m-%d %I:%M:%S %p')
