@@ -76,6 +76,40 @@ V3 矩阵架构(master + worker)代码已经写了大半,worker1 跑通过一次
 
 ### 第 8 轮 — 修复"货不对板" Bug A + Bug B
 
+(详见下文)
+
+### 第 11 轮发现 — 独立架构 bug:sync.py 告警创建与 task 生命周期不一致
+
+**现象**:用户点「🔄 更新代码」按钮重启 worker 后,master 端任务表显示 `status=human_required`,但 `alerts` 表完全没有对应记录,UI 告警处理页空。
+
+**根因**(子 agent 深扫确认):
+1. worker 触发 human_required 时,会同时更新 state.json(status=human_required)和 tasks.json(task.status=human_required)
+2. worker 被 systemctl restart(用户点更新代码按钮触发)→ `worker/worker.py:264` 启动时无条件 `update_state(status="idle")` 把 state.json 重置
+3. master sync 拉 state.json 看到 status=idle → `sync.py:232` 守卫失败 → 不创建 alert
+4. 但 `sync.py:258-270` 任务状态合并不受 state 守卫,task.status='human_required' 仍写回 master DB
+5. 结果:task 状态固化在 human_required,但 alerts 表空
+
+**架构问题**:`sync.py:232` 把"创建告警"绑在 worker state.status,但 state 在 worker 重启时会被清,task 不会。两者生命周期不一致。
+
+### 第 13 轮 — 加 UI 北京时间显示 + 修 sync.py 告警 bug
+
+**新增 `master/timezone_utils.py`** — `to_beijing(ts_str)` helper,把数据库里的 VPS 本地时间字符串转换为北京时间字符串。考虑了夏令时和容错(None / NaT / 解析失败等)。
+
+**应用到 5 处 UI**:
+- `master/app.py:79` — worker 心跳
+- `master/pages/2_💻_节点管理.py` — worker 心跳
+- `master/pages/3_📝_任务录入.py` — 排期/开始/完成时间(列名加"(北京)")
+- `master/pages/4_🚨_告警处理.py` — 上报时间
+- `master/pages/5_📋_运行日志.py` — 时间列(列名"时间(北京)")
+
+**修 sync.py 告警 bug**(第 11 轮发现的架构 bug):
+- 旧逻辑:`if new_status == "human_required"` 守卫(基于 worker state.status,会被 worker 重启清掉)
+- 新逻辑:在任务状态合并循环里,**每个 task 检查"当前 status=human_required 且没有未解决的 alert"**,如果是就创建 alert。脱离 state.status,只依赖 task 状态(task 是持久化的)。
+- 性能:只在有新告警时调一次 `pull_screenshots`,避免每次同步都拖文件
+- 兜底:即使 worker 重启清了 state,只要 task 状态还在,master 下次同步会补上 alert
+
+**Why:** 用户测试 worker1 时,任务 ID 4 跑出 human_required 但告警页空,无法处理。第 11 轮子 agent 已经定位根因,这一轮把修复落地。同时趁等 ID 5 跑(45 分钟空档)把用户长期想要的"UI 显示北京时间"做了,VPS 时间存储不动,UI 转 +8。
+
 **`worker/worker.py`:**
 - `VIDEO_TEMP`(固定路径)→ 删除
 - 新增 `VIDEO_TEMP_DIR = Path("/tmp")` + `VIDEO_TEMP_PREFIX = "twitter-worker-video-"`
