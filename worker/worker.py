@@ -13,18 +13,31 @@ Worker 主进程。每台 VPS 跑这一个,由 systemd 拉起。
 """
 
 import json
+import os
 import random
 import signal
 import sys
+import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import popup_handler as pop
 import tweet_engine as eng
 import traffic
 import socks_relay
+
+
+# 日志统一用北京时间输出,不改系统时区(风控需要系统时区跟 IP 所在地一致)
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 中控推送 reload 后,下轮任务拉取忽略 scheduled_at 时间限制,立即执行
+_reload_triggered = False
+
+# 看门狗:主循环超过 5 分钟无心跳则强制退出,由 systemd 重启
+_WATCHDOG_LAST_BEAT = time.time()
+_WATCHDOG_RUNNING = True
 
 
 WORK_DIR = Path("/opt/twitter-worker")
@@ -74,11 +87,30 @@ def _sigterm(*_):
 
 
 def log(msg: str):
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
+    ts = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}\n"
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(line)
     print(line, end="", flush=True)
+
+
+def _heartbeat():
+    """看门狗心跳:每轮主循环调用一次。"""
+    global _WATCHDOG_LAST_BEAT
+    _WATCHDOG_LAST_BEAT = time.time()
+
+
+def _watchdog_loop():
+    """看门狗线程:每 60 秒检查一次主循环是否停滞。超过 5 分钟无心跳则 os._exit。"""
+    global _WATCHDOG_RUNNING
+    while _WATCHDOG_RUNNING:
+        time.sleep(60)
+        idle = time.time() - _WATCHDOG_LAST_BEAT
+        if idle > 300:
+            log(f"看门狗:主循环 {idle:.0f} 秒无心跳,强制退出由 systemd 重启")
+            time.sleep(1)
+            os._exit(1)
 
 
 def _now_str():
@@ -152,8 +184,12 @@ def proxy_dicts(config) -> tuple:
     return socks_relay.local_chromium_proxy(), socks_relay.local_ytdlp_proxy_url()
 
 
-def pick_next_task(tasks):
-    """挑下一条:status=scheduled 且 scheduled_at <= now,取最早。"""
+def pick_next_task(tasks, ignore_schedule=False):
+    """挑下一条:status=scheduled 且 scheduled_at <= now,取最早。
+
+    ignore_schedule=True 时,忽略 scheduled_at 时间限制(用于收到中控 reload 强制唤醒后
+    立即执行,不受 work_start 排期窗口限制)。
+    """
     now = datetime.now()
     candidates = []
     for t in tasks:
@@ -161,12 +197,14 @@ def pick_next_task(tasks):
             continue
         sched = t.get("scheduled_at")
         if not sched:
+            if ignore_schedule:
+                candidates.append((now, t))
             continue
         try:
             t_time = datetime.strptime(sched, "%Y-%m-%d %H:%M:%S")
         except Exception:
             continue
-        if t_time <= now:
+        if t_time <= now or ignore_schedule:
             candidates.append((t_time, t))
     if not candidates:
         return None
@@ -282,13 +320,20 @@ def reset_stale_running_tasks():
 
 
 def main_loop():
+    global _reload_triggered, _WATCHDOG_RUNNING
     paused = False
     update_state(status="idle", current_task_id=None)
     log("Worker 启动")
     reset_stale_running_tasks()
     cleanup_all_video_temps()
 
+    # 启动看门狗线程(守护线程,主进程退出时自动结束)
+    wd = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
+    wd.start()
+
     while _running:
+        _heartbeat()  # 看门狗心跳
+
         cmd = consume_command()
         if cmd:
             action = cmd.get("action")
@@ -301,7 +346,8 @@ def main_loop():
                 update_state(status="idle")
                 log("收到 resume")
             elif action == "reload":
-                log("收到 reload")
+                log("收到 reload,强制重载任务")
+                _reload_triggered = True
             else:
                 log(f"未识别命令:{cmd}")
 
@@ -309,24 +355,31 @@ def main_loop():
         update_state(traffic_used_gb=gb)
 
         if paused:
+            log("已暂停,等待 resume")
             time.sleep(15)
             continue
 
         config = load_json(CONFIG_FILE, None)
         if not config or not config.get("cookie_json"):
+            log("等待 config.json 或 cookie_json")
             update_state(status="pending", message="缺 config.json 或 cookie_json")
             time.sleep(30)
             continue
 
         quota = config.get("traffic_quota_gb", 1000)
         if gb >= quota * 0.95:
+            log(f"流量 {gb:.1f}/{quota} 接近上限,暂停")
             update_state(status="paused", message=f"流量 {gb:.1f}/{quota} 接近上限,暂停")
             time.sleep(300)
             continue
 
         tasks = load_json(TASKS_FILE, [])
-        task = pick_next_task(tasks)
+        task = pick_next_task(tasks, ignore_schedule=_reload_triggered)
+        if _reload_triggered:
+            _reload_triggered = False
+
         if not task:
+            log("无到点任务,等待 30 秒")
             update_state(status="idle", message="无到点任务")
             time.sleep(30)
             continue
@@ -352,11 +405,16 @@ def main_loop():
             if not _running:
                 break
             cmd = consume_command()
-            if cmd and cmd.get("action") == "pause":
-                paused = True
-                update_state(status="paused")
-                log("休息中收到 pause")
-                break
+            if cmd:
+                if cmd.get("action") == "pause":
+                    paused = True
+                    update_state(status="paused")
+                    log("休息中收到 pause")
+                    break
+                elif cmd.get("action") == "reload":
+                    log("休息中收到 reload,提前结束休息")
+                    _reload_triggered = True
+                    break
             time.sleep(1)
 
 

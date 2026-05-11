@@ -132,6 +132,9 @@ def push_tasks(worker: dict, tasks: list[dict]) -> None:
         ssh.put_text(json.dumps(payload, ensure_ascii=False, indent=2),
                      f"{WORKER_REMOTE_DIR}/tasks.json")
 
+    # 推送任务后发送 reload 命令,强制 worker 中断 sleep 并立即拉取任务
+    push_command(worker, "reload")
+
 
 def push_command(worker: dict, action: str, **extra) -> None:
     payload = {"action": action, "ts": datetime.now().isoformat(), **extra}
