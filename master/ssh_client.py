@@ -247,22 +247,40 @@ def verify_v31_env(
                 checks.append({"name": "venv Python", "ok": False, "msg": str(e)[:200]})
                 all_ok = False
 
-            # 4. chromium 浏览器缓存
-            try:
-                rc, out, _ = ssh.exec(
-                    "ls /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome 2>/dev/null | head -1",
-                    timeout=10,
-                )
-                if rc == 0 and out.strip():
-                    checks.append({"name": "Chromium 浏览器", "ok": True, "msg": "已缓存"})
-                else:
-                    checks.append({
-                        "name": "Chromium 浏览器", "ok": False,
-                        "msg": "未安装,请运行: /opt/twitter-worker/venv/bin/playwright install chromium",
-                    })
-                    all_ok = False
-            except Exception as e:
-                checks.append({"name": "Chromium 浏览器", "ok": False, "msg": str(e)[:200]})
+            # 4. chromium 浏览器(用 playwright 自身 API 查 executable_path,
+            # 不依赖硬编码缓存路径结构;优先试 venv,再试系统 python3)
+            chromium_found = False
+            chromium_detail = ""
+            for py_cmd in ("/opt/twitter-worker/venv/bin/python", "python3"):
+                try:
+                    rc, out, _ = ssh.exec(
+                        py_cmd + ' -c "'
+                        'from playwright.sync_api import sync_playwright;'
+                        'p = sync_playwright().start();'
+                        'import os;'
+                        'ep = p.chromium.executable_path;'
+                        'ok = os.path.exists(ep) if ep else False;'
+                        'print(\"found=\" + str(ok) + \" path=\" + str(ep));'
+                        'p.stop()"',
+                        timeout=30,
+                    )
+                    if rc == 0 and "found=True" in out:
+                        chromium_found = True
+                        chromium_detail = out.strip()
+                        break
+                    elif rc == 0:
+                        chromium_detail = out.strip() or f"检测通过但浏览器缺失 (via {py_cmd})"
+                    else:
+                        chromium_detail = f"检测命令失败 rc={rc} (via {py_cmd})"
+                except Exception as e:
+                    chromium_detail = f"检测异常 (via {py_cmd}): {str(e)[:100]}"
+            if chromium_found:
+                checks.append({"name": "Chromium 浏览器", "ok": True, "msg": chromium_detail})
+            else:
+                checks.append({
+                    "name": "Chromium 浏览器", "ok": False,
+                    "msg": f"{chromium_detail} | 请运行: python3 -m playwright install chromium",
+                })
                 all_ok = False
 
     except Exception as e:

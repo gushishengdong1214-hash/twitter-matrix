@@ -99,8 +99,13 @@ echo ">> [5/7] V3.1 Python 依赖"
 # --with-deps 自动装 libnss/libxkbcommon/libasound 等运行时库
 # ───────────────────────────────────────────
 echo
-echo ">> [6/7] Playwright Chromium"
-"$INSTALL_DIR/venv/bin/playwright" install --with-deps chromium
+echo ">> [6/7] Playwright Chromium 浏览器 + 系统依赖"
+# 某些 VPS 上 venv 的 playwright 二进制会静默失败,
+# 优先用 python -m playwright 更稳(绕过 PATH/脚本解析问题)
+if ! "$INSTALL_DIR/venv/bin/python" -m playwright install --with-deps chromium; then
+    echo "venv playwright install 失败,尝试系统 python3..."
+    python3 -m playwright install --with-deps chromium
+fi
 
 # ───────────────────────────────────────────
 # 第 7 步:环境就绪验证
