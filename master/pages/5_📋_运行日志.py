@@ -4,10 +4,12 @@ import pandas as pd
 import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 from timezone_utils import to_beijing
 
 st.set_page_config(page_title="运行日志", page_icon="📜", layout="wide")
+check_auth()
 st.title("📜 运行日志")
 
 workers = db.list_workers()

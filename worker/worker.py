@@ -35,9 +35,11 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 # 中控推送 reload 后,下轮任务拉取忽略 scheduled_at 时间限制,立即执行
 _reload_triggered = False
 
-# 看门狗:主循环超过 5 分钟无心跳则强制退出,由 systemd 重启
+# 看门狗:主循环超过 N 秒无心跳则强制退出,由 systemd 重启
+# 默认 300s(5min),任务执行期间放宽到 1200s(20min)
 _WATCHDOG_LAST_BEAT = time.time()
 _WATCHDOG_RUNNING = True
+_WATCHDOG_TIMEOUT = 300  # 动态阈值,任务期间会被改大
 
 
 WORK_DIR = Path("/opt/twitter-worker")
@@ -102,15 +104,44 @@ def _heartbeat():
 
 
 def _watchdog_loop():
-    """看门狗线程:每 60 秒检查一次主循环是否停滞。超过 5 分钟无心跳则 os._exit。"""
+    """看门狗线程:每 60 秒检查一次主循环是否停滞。阈值动态(默认 300s,任务期间 1200s)。"""
     global _WATCHDOG_RUNNING
     while _WATCHDOG_RUNNING:
         time.sleep(60)
         idle = time.time() - _WATCHDOG_LAST_BEAT
-        if idle > 300:
-            log(f"看门狗:主循环 {idle:.0f} 秒无心跳,强制退出由 systemd 重启")
+        threshold = _WATCHDOG_TIMEOUT
+        if idle > threshold:
+            log(f"看门狗:主循环 {idle:.0f} 秒无心跳(阈值{threshold}s),强制退出由 systemd 重启")
             time.sleep(1)
             os._exit(1)
+
+
+def _start_task_watchdog():
+    """任务开始时放宽看门狗阈值到 1200 秒(20 分钟),允许长视频下载/处理。"""
+    global _WATCHDOG_TIMEOUT
+    _WATCHDOG_TIMEOUT = 1200
+    _heartbeat()
+
+
+def _end_task_watchdog():
+    """任务结束后恢复看门狗阈值到 300 秒(5 分钟)。"""
+    global _WATCHDOG_TIMEOUT
+    _WATCHDOG_TIMEOUT = 300
+    _heartbeat()
+
+
+def _async_heartbeat_loop():
+    """独立心跳线程:每 15 秒无条件喂狗,不受主线程阻塞影响。
+    确保 download_video / post_to_twitter / ffmpeg 等长阻塞操作期间看门狗不误杀。
+    SIGTERM 后仍继续喂狗最多 60 秒,给阻塞操作优雅收尾的时间。
+    """
+    sigterm_grace = 0
+    while _running or sigterm_grace < 60:
+        _heartbeat()
+        for _ in range(15):
+            if not _running:
+                sigterm_grace += 1
+            time.sleep(1)
 
 
 def _now_str():
@@ -219,6 +250,9 @@ def run_one_task(task: dict, config: dict):
     video_temp = video_temp_for(tid)
     video_compliant = video_compliant_for(tid)
 
+    # 任务开始时放宽看门狗阈值(允许长视频下载/处理不超 20 分钟)
+    _start_task_watchdog()
+
     # 任务开头强制清理同名残留(防 Bug A:上次任务的不完整文件被复用)
     for p in (video_temp, video_compliant):
         if p.exists():
@@ -235,7 +269,7 @@ def run_one_task(task: dict, config: dict):
     pw_proxy, yt_proxy = proxy_dicts(config)
     user_agent = config.get("user_agent") or eng.DEFAULT_UA
 
-    if not eng.download_video(url, video_temp, yt_proxy, pw_proxy, user_agent, log):
+    if not eng.download_video(url, video_temp, yt_proxy, pw_proxy, user_agent, log, heartbeat_fn=_heartbeat):
         log(f"任务 {tid} 下载失败")
         # 部分写入的文件也要清掉,防止下次复用
         for p in (video_temp, video_compliant):
@@ -246,10 +280,11 @@ def run_one_task(task: dict, config: dict):
                     pass
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message="download failed")
+        _end_task_watchdog()
         return
 
     # 视频合规检查:超过 Twitter 限制(140s/512MB)的会被转码截断
-    if not eng.ensure_video_compliance(video_temp, video_compliant, log):
+    if not eng.ensure_video_compliance(video_temp, video_compliant, log, heartbeat_fn=_heartbeat):
         log(f"任务 {tid} 视频合规检查失败")
         for p in (video_temp, video_compliant):
             if p.exists():
@@ -259,6 +294,7 @@ def run_one_task(task: dict, config: dict):
                     pass
         update_task_in_file(tid, status="failed", finished_at=_now_str(),
                             error_message="compliance failed")
+        _end_task_watchdog()
         return
 
     try:
@@ -269,6 +305,7 @@ def run_one_task(task: dict, config: dict):
             pw_proxy=pw_proxy,
             screenshot_dir=SCREENSHOT_DIR,
             log=log,
+            heartbeat_fn=_heartbeat,
         )
         update_task_in_file(tid, status="done", finished_at=_now_str())
         log(f"任务 {tid} 完成")
@@ -302,21 +339,46 @@ def run_one_task(task: dict, config: dict):
                     p.unlink()
                 except Exception:
                     pass
+        _end_task_watchdog()
 
 
-def reset_stale_running_tasks():
-    """启动时把 tasks.json 里 status=running 的任务回退为 scheduled。
-    防止 worker 重启时丢了正在跑的任务,导致后续永远不再调度它。"""
+def reset_zombie_tasks():
+    """启动时重置所有僵尸状态任务。
+
+    - running → failed: worker 重启必然中断
+    - scheduled 且 scheduled_at 是昨天或更早 → pending: 错过调度窗口,让中控重排
+    被重置的 running 任务 ID 会写入 state.json,由中控 sync 时读走并同步到数据库。
+    """
     tasks = load_json(TASKS_FILE, [])
-    n = 0
+    n_running = 0
+    n_scheduled = 0
+    reset_ids = []
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
     for t in tasks:
-        if t.get("status") == "running":
-            t["status"] = "scheduled"
+        status = t.get("status")
+        if status == "running":
+            t["status"] = "failed"
+            t["error_message"] = "worker 重启导致任务中断"
             t["started_at"] = None
-            n += 1
-    if n:
+            n_running += 1
+            reset_ids.append(t.get("id"))
+        elif status == "scheduled":
+            sched = t.get("scheduled_at", "")
+            if sched and not sched.startswith(today_prefix):
+                t["status"] = "pending"
+                t["scheduled_at"] = None
+                n_scheduled += 1
+    if n_running or n_scheduled:
         save_json(TASKS_FILE, tasks)
-        log(f"启动时回退 {n} 个 stale running 任务为 scheduled")
+        log(f"启动时重置 {n_running} 个 running→failed, {n_scheduled} 个过期 scheduled→pending")
+
+    # 向 Master 报告被重置的 running 任务,由中控 sync_worker 读走并更新数据库
+    if reset_ids:
+        state = load_json(STATE_FILE, {})
+        state["reset_running_tasks"] = reset_ids
+        state["reset_running_at"] = _now_str()
+        save_json(STATE_FILE, state)
+        log(f"已向 Master 报告重置任务: {reset_ids}")
 
 
 def main_loop():
@@ -324,14 +386,24 @@ def main_loop():
     paused = False
     update_state(status="idle", current_task_id=None)
     log("Worker 启动")
-    reset_stale_running_tasks()
+    reset_zombie_tasks()
     cleanup_all_video_temps()
 
     # 启动看门狗线程(守护线程,主进程退出时自动结束)
     wd = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
     wd.start()
 
+    # 启动异步心跳线程:独立于主循环,每 15 秒无条件喂狗
+    # 防止 download_video / post_to_twitter / ffmpeg 等长阻塞操作期间看门狗误杀
+    hb = threading.Thread(target=_async_heartbeat_loop, daemon=True, name="async_heartbeat")
+    hb.start()
+
     while _running:
+        # 心跳线程存活检查:若意外退出立即重启
+        if not hb.is_alive():
+            log("异步心跳线程意外退出,立即重启")
+            hb = threading.Thread(target=_async_heartbeat_loop, daemon=True, name="async_heartbeat")
+            hb.start()
         _heartbeat()  # 看门狗心跳
 
         cmd = consume_command()

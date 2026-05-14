@@ -16,7 +16,7 @@ if _PASSWORD:
             pwd = st.text_input("登录密码", type="password")
             if st.form_submit_button("登录", type="primary"):
                 if pwd == _PASSWORD:
-                    st.session_state["authed"] = True
+                    st.session_state["logged_in"] = True
                     st.rerun()
                 else:
                     st.error("密码不对")

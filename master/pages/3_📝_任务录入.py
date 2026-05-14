@@ -3,9 +3,15 @@ import sys
 import pandas as pd
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 import scheduler as sched
+import sync as syn
 from timezone_utils import to_beijing
+
+st.set_page_config(page_title="任务录入", page_icon="📋", layout="wide")
+check_auth()
+st.title("📋 任务录入")
 
 # ========== 状态中文映射 ==========
 _STATUS_MAP = {
@@ -155,6 +161,15 @@ if tasks:
             if count == 0:
                 st.warning("没有任务可清空")
             else:
+                # 先物理杀掉 worker 进程,确保任何 running 任务立刻被中断
+                try:
+                    w = db.get_worker(worker_id)
+                    if w:
+                        ok, msg = syn.kill_worker_processes(w)
+                        st.caption(f"Worker 急停: {msg}")
+                except Exception as e:
+                    st.caption(f"Worker 急停失败: {e}")
+                # 杀掉后再从数据库删除
                 deleted = db.delete_tasks_by_status(worker_id, clear_status_key)
                 st.success(f"已删除 {deleted} 条任务")
                 st.rerun()
@@ -174,6 +189,23 @@ if tasks:
         if selected_ids:
             st.caption(f"已选 {len(selected_ids)} 条")
             if st.button("🗑️ 批量删除选中任务", key=f"btn_del_{worker_id}", type="primary"):
+                # 先查出正在 running 的任务对应的 worker,需要物理杀掉
+                running_workers = set()
+                for tid in selected_ids:
+                    task = db.get_task(tid)
+                    if task and task.get("status") == "running":
+                        running_workers.add(task["worker_id"])
+
+                deleted = db.delete_tasks(selected_ids)
+
+                # 物理杀掉正在执行被删任务的 worker 进程(先杀后删,避免 worker 在 delete 后仍继续跑)
+                for wid in running_workers:
+                    w = db.get_worker(wid)
+                    if w:
+                        ok, msg = syn.kill_worker_processes(w)
+                        st.caption(f"Worker {w['nickname']} 急停: {msg}")
+
+                # 杀掉后再从数据库删除,确保 worker 侧也被中断
                 deleted = db.delete_tasks(selected_ids)
                 st.success(f"已删除 {deleted} 条任务")
                 st.rerun()

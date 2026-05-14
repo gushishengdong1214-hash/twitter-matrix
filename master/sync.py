@@ -7,6 +7,7 @@
 
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -223,6 +224,23 @@ def sync_worker(worker: dict) -> dict:
         db.add_log(worker["id"], None, "ERROR", f"SSH 连接失败:{e}")
         return {"ok": False, "message": f"连接失败:{e}"}
 
+    # 处理 worker 启动时报告的僵尸任务重置
+    reset_ids = state.get("reset_running_tasks", []) if state else []
+    if reset_ids:
+        for tid in reset_ids:
+            db.update_task(tid, status="failed", error_message="worker 重启导致任务中断")
+            db.add_log(worker["id"], tid, "INFO", f"Worker 启动时自动重置 running 任务 {tid} 为 failed")
+        # 清除 worker state.json 中的标志,避免重复处理
+        try:
+            with SSHClient(**_creds(worker)) as ssh:
+                new_state = dict(state)
+                new_state.pop("reset_running_tasks", None)
+                new_state.pop("reset_running_at", None)
+                ssh.put_text(json.dumps(new_state, ensure_ascii=False, indent=2),
+                             f"{WORKER_REMOTE_DIR}/state.json")
+        except Exception as e:
+            db.add_log(worker["id"], None, "WARN", f"清除 worker reset_running_tasks 标志失败:{e}")
+
     if state:
         new_status = state.get("status", "idle")
         db.update_worker(
@@ -276,6 +294,25 @@ def sync_worker(worker: dict) -> dict:
                     fields[k] = rt[k]
             if fields:
                 db.update_task(tid, **fields)
+
+            # 中控主动探测:任务 "running" 超过 30 分钟且无完成,自动标记超时
+            if rt.get("status") == "running" and rt.get("started_at"):
+                try:
+                    from datetime import datetime
+                    started = datetime.strptime(rt["started_at"], "%Y-%m-%d %H:%M:%S")
+                    if (datetime.now() - started).total_seconds() > 1800:
+                        db.update_task(
+                            tid,
+                            status="failed",
+                            error_message="任务运行超过30分钟无完成,中控判定超时",
+                        )
+                        db.add_log(
+                            worker["id"], tid, "WARN",
+                            f"任务 {tid} 运行超30分钟,自动标记超时失败",
+                        )
+                except Exception:
+                    pass
+
             if rt.get("status") == "human_required":
                 with db.get_conn() as c:
                     existed = c.execute(
@@ -465,5 +502,27 @@ def restart_worker(worker: dict) -> tuple[bool, str]:
             if rc == 0:
                 return True, "已重启"
             return False, err or out
+    except Exception as e:
+        return False, str(e)
+
+
+def kill_worker_processes(worker: dict) -> tuple[bool, str]:
+    """物理杀掉 worker 上的任务子进程并重启服务。
+
+    用于急停:删除正在 running 的任务时,必须终止 worker 防止它继续执行。
+    先 SIGTERM 优雅终止,2 秒后 SIGKILL 确保杀干净,最后 systemctl restart 拉起新实例。
+    """
+    try:
+        with SSHClient(**_creds(worker)) as ssh:
+            # 先优雅终止 worker 主进程
+            ssh.exec("pkill -TERM -f 'python.*worker\\.py' 2>/dev/null || true", timeout=10)
+            time.sleep(2)
+            # 强制终止所有残留(yt-dlp/ffmpeg/chromium 可能作为孤儿进程残留)
+            ssh.exec("pkill -9 -f 'python.*worker\\.py' 2>/dev/null || true", timeout=10)
+            ssh.exec("pkill -9 -f 'yt-dlp' 2>/dev/null || true", timeout=10)
+            ssh.exec("pkill -9 -f 'ffmpeg' 2>/dev/null || true", timeout=10)
+            # 重启服务(systemd 会拉起新 worker 进程)
+            ssh.exec("systemctl restart twitter-worker", timeout=30)
+        return True, "已物理杀掉进程并重启"
     except Exception as e:
         return False, str(e)

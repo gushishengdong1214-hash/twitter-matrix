@@ -4,11 +4,13 @@ import hashlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 from crawler import crawl_site, SUPPORTED_SITES
 from crawler.translator import translate
 
 st.set_page_config(page_title="视频采集", page_icon="🕷️", layout="wide")
+check_auth()
 st.title("🕷️ 视频采集")
 st.caption("从目标站点抓取视频链接和标题,自动翻译为中文文案,人工确认后加入任务队列。")
 

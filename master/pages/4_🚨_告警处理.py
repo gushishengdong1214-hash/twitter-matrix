@@ -2,11 +2,13 @@ import streamlit as st
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 import sync as syn
 from timezone_utils import to_beijing
 
 st.set_page_config(page_title="告警", page_icon="🚨", layout="wide")
+check_auth()
 st.title("🚨 告警 / 人工处理队列")
 
 # 告警类型中文映射

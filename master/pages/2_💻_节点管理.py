@@ -3,12 +3,14 @@ import sys
 import json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 import sync as syn
 from ssh_client import test_connection, verify_v31_env
 from timezone_utils import to_beijing
 
 st.set_page_config(page_title="Workers", page_icon="💻", layout="wide")
+check_auth()
 st.title("💻 Workers (VPS 节点)")
 st.caption("1 Worker = 1 VPS + 1 静态住宅代理 + 1 推特账号。")
 

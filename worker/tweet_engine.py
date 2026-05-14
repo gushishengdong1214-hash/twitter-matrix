@@ -4,6 +4,7 @@ import json
 import random
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -116,19 +117,17 @@ def _try_handle_twofa(page, twofa_secret: str, log) -> bool:
     return True
 
 
-def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Optional[str]:
+def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
+                heartbeat_fn=None) -> Optional[str]:
     """对 jable.tv / hanime1.me 这类站点,用浏览器嗅探真实视频流。
 
     多层策略,按优先级:
-      1) 主策略:打开页面后,从 DOM 里读主 <video> 元素的 currentSrc / src(若是 m3u8 URL 直接命中)。
-         注:jable 用 HLS.js,video.src 通常是 blob,这层会 miss → 走下面
-      2) 兜底 1:抓所有 m3u8 请求,排除预览/广告/缩略图等 URL 模式后,
-         只剩 1 个就用它;有多个就 GET 一遍 m3u8 内容,选 #EXTINF segment 数最多的
-         (主视频通常 segment 数 >> 推荐位预览)
-      3) 兜底 2:若以上都失败,fallback 到旧逻辑(返回排除后的第一个)
+      1) 主策略:打开页面后,从 DOM 里读主 <video> 元素的 currentSrc / src
+      2) 兜底 1:抓所有 m3u8 请求,排除预览/广告/缩略图后选 #EXTINF segment 数最多的
+      3) 兜底 2:返回排除后的第一个
     """
     log("打开浏览器嗅探 m3u8...")
-    # 详情页常见的非主视频 m3u8 模式 — 主要排除推荐位 hover preview / 广告 / 缩略图
+    # 详情页常见的非主视频 m3u8 模式
     EXCLUDE_PATTERNS = [
         "/preview", "/trailer", "/thumb", "/thumbnail",
         "/ad/", "/ads/", "preview.m3u8", "/sprite",
@@ -137,6 +136,10 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
     def is_excluded(u: str) -> bool:
         ul = u.lower()
         return any(pat in ul for pat in EXCLUDE_PATTERNS)
+
+    def _hb():
+        if heartbeat_fn:
+            heartbeat_fn()
 
     try:
         with sync_playwright() as p:
@@ -151,13 +154,11 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
             )
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                # 第一步:等 DOM + 播放器脚本加载
+                # 第一步:等 DOM + 播放器脚本加载(分 5 秒+心跳,防看门狗误杀)
                 page.wait_for_timeout(5000)
+                _hb()
 
                 # 第二步:程序化触发主视频加载
-                # jable.tv / hanime1.me 这类站不会在 page load 时 prefetch 主视频 m3u8,
-                # 主视频请求只在用户点 play 时才触发。必须程序化调 video.play() 才能嗅到。
-                # muted=true 用于绕过 Chrome autoplay policy(无声播放允许)。
                 try:
                     page.evaluate(
                         """() => {
@@ -171,7 +172,7 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                 except Exception as e:
                     log(f"触发 play 失败:{e}")
 
-                # 兜底:点常见的 play 按钮(部分播放器需要 user gesture 才解锁 video element)
+                # 兜底:点常见的 play 按钮
                 try:
                     for sel in [
                         ".vjs-big-play-button",
@@ -191,8 +192,10 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                 except Exception:
                     pass
 
-                # 第三步:等 m3u8 请求被发出(主视频 m3u8 通常在 play 触发后 1-10 秒出现)
-                page.wait_for_timeout(15000)
+                # 第三步:等 m3u8 请求(15 秒分 3 段,每 5 秒喂狗一次)
+                for _ in range(3):
+                    page.wait_for_timeout(5000)
+                    _hb()
 
                 # 主策略:DOM 里找主 video 元素的 m3u8 src
                 try:
@@ -207,21 +210,22 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                         }"""
                     )
                     if video_src:
-                        log(f"主策略:从 <video>.currentSrc 命中 m3u8")
+                        log(f"主策略命中: {video_src[:120]}")
                         return video_src
                 except Exception as e:
                     log(f"主策略读 video 元素失败:{e}")
 
                 # 兜底 1:过滤掉已知非主视频模式
-                unique = list(dict.fromkeys(captured))  # 去重保序
+                unique = list(dict.fromkeys(captured))
                 filtered = [u for u in unique if not is_excluded(u)]
-                log(f"嗅到 {len(unique)} 个 m3u8,排除预览/广告/缩略图后剩 {len(filtered)} 个")
+                log(f"嗅到 {len(unique)} 个 m3u8,排除后剩 {len(filtered)} 个")
 
                 if not filtered:
                     log("所有 m3u8 都被排除,放弃")
                     return None
 
                 if len(filtered) == 1:
+                    log(f"唯一候选: {filtered[0][:120]}")
                     return filtered[0]
 
                 # 多个候选:GET 每个 m3u8,选 #EXTINF segment 数最多的
@@ -235,7 +239,6 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                         text = resp.text()
                         seg_count = text.count("#EXTINF")
                         if seg_count == 0:
-                            # 可能是 master playlist,粗略计数 .ts / 行数
                             seg_count = max(text.count(".ts"), len(text.splitlines()))
                         if seg_count > best_count:
                             best_count = seg_count
@@ -244,11 +247,11 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
                         continue
 
                 if best:
-                    log(f"次兜底:多候选,选 segment 数最多 ({best_count}) 的 m3u8")
+                    log(f"选 segment 最多({best_count}): {best[:120]}")
                     return best
 
-                # 最后兜底:返回排除后的第一个
-                log("兜底 2:返回排除后的第一个 m3u8")
+                # 最后兜底
+                log(f"兜底返回第一个: {filtered[0][:120]}")
                 return filtered[0]
             finally:
                 try:
@@ -260,6 +263,45 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log) -> Opt
     return None
 
 
+def _make_progress_hook(log, heartbeat_fn=None):
+    """yt-dlp progress_hooks 工厂:每 5% 输出简洁进度日志,同时喂狗。"""
+    last_logged_pct = -1
+    last_logged_time = 0
+
+    def hook(d):
+        nonlocal last_logged_pct, last_logged_time
+        status = d.get("status")
+        if status == "downloading":
+            # 每收到一个分片都喂狗
+            if heartbeat_fn:
+                heartbeat_fn()
+
+            pct = d.get("percentage") or 0.0
+            now = time.time()
+            rounded_pct = int(pct // 5) * 5
+
+            # 每 5% 变化 或 每 15 秒强制输出一次
+            if rounded_pct > last_logged_pct or (now - last_logged_time) >= 15:
+                last_logged_pct = rounded_pct
+                last_logged_time = now
+
+                total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                speed = d.get("speed") or 0
+                speed_mbps = speed / (1024 * 1024) if speed else 0
+
+                if total_bytes:
+                    total_mb = total_bytes / (1024 * 1024)
+                    log(f"[下载进度] {rounded_pct}% ({speed_mbps:.1f}MB/s / {total_mb:.0f}MB)")
+                else:
+                    log(f"[下载进度] {rounded_pct}% ({speed_mbps:.1f}MB/s)")
+        elif status == "finished":
+            log("[下载进度] 100% 完成,合并中...")
+            if heartbeat_fn:
+                heartbeat_fn()
+
+    return hook
+
+
 def download_video(
     url: str,
     out_path: Path,
@@ -267,15 +309,16 @@ def download_video(
     pw_proxy: Optional[dict],
     user_agent: str,
     log,
+    heartbeat_fn=None,
 ) -> bool:
     # 通用策略:先用浏览器嗅 m3u8(过 Cloudflare 等反爬),嗅到就用 m3u8 给 yt-dlp,
     # 没嗅到再 fallback 给 yt-dlp 原 URL(yt-dlp 内置支持很多站)。
     # jable.tv 特殊:嗅不到就直接放弃,因为 yt-dlp 会拒绝它的页面 URL。
     real_url = url
-    sniffed = _sniff_m3u8(url, pw_proxy, user_agent, log)
+    sniffed = _sniff_m3u8(url, pw_proxy, user_agent, log, heartbeat_fn=heartbeat_fn)
     if sniffed:
         real_url = sniffed
-        log(f"嗅探到 m3u8: {sniffed[:60]}...")
+        log(f"嗅探到 m3u8: {sniffed[:120]}")
     elif "jable.tv" in url:
         log("jable.tv 嗅不到 m3u8,yt-dlp 会拒绝其页面,放弃")
         return False
@@ -290,9 +333,14 @@ def download_video(
         "outtmpl": str(out_path),
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
-        "quiet": False,
+        "quiet": True,  # 关闭 yt-dlp 自带输出,用 progress_hooks 接管
         "no_warnings": True,
+        # 硬性约束:禁止无限重试,分片 60 秒超时
+        "retries": 3,
+        "fragment_retries": 5,
+        "socket_timeout": 60,
         "concurrent_fragment_downloads": 15,
+        "progress_hooks": [_make_progress_hook(log, heartbeat_fn)],
         "http_headers": {
             "User-Agent": user_agent,
             "Referer": url,
@@ -322,7 +370,7 @@ def download_video(
         return False
 
 
-def ensure_video_compliance(in_path: Path, out_path: Path, log) -> bool:
+def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=None) -> bool:
     """检查并转码视频以符合 Twitter 发布标准。
 
     Twitter 规范:时长 <= 140s,大小 <= 512MB,H.264 + AAC,yuv420p。
@@ -391,6 +439,16 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log) -> bool:
         str(out_path),
     ]
 
+    # ffmpeg 运行期间启动独立喂狗线程,防止看门狗误杀
+    _ffmpeg_hb_running = True
+    def _ffmpeg_hb():
+        while _ffmpeg_hb_running:
+            if heartbeat_fn:
+                heartbeat_fn()
+            time.sleep(10)
+    _ffmpeg_hb_thread = threading.Thread(target=_ffmpeg_hb, daemon=True)
+    _ffmpeg_hb_thread.start()
+
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
@@ -408,6 +466,8 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log) -> bool:
         except FileNotFoundError:
             pass
         return False
+    finally:
+        _ffmpeg_hb_running = False
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         log("压制:输出文件不存在或为空")
@@ -425,8 +485,12 @@ def post_to_twitter(
     pw_proxy: Optional[dict],
     screenshot_dir: Path,
     log,
+    heartbeat_fn=None,
 ):
-    """成功返回 None;碰到未知卡住状态抛 UnknownPopupError。"""
+    """成功返回 None;碰到未知卡住状态抛 UnknownPopupError。
+
+    heartbeat_fn: 长等待期间定期调用,防止看门狗误杀。
+    """
     cookie_raw = config.get("cookie_json", "")
     user_agent = config.get("user_agent") or DEFAULT_UA
     viewport = config.get("viewport") or {"width": 1920, "height": 1080}
@@ -517,15 +581,25 @@ def post_to_twitter(
             # X 的发推按钮视觉上始终是黑色,但 DOM 里 disabled 真实存在,
             # disabled 阻止 React 处理 onClick,即使 force click 也不会触发后端。
             # 必须等 X 后台处理完视频(disabled 消失)才能 click。
+            # 改为 10 秒轮询,期间喂狗,防止 30 分钟单阻塞导致看门狗误杀。
             log("等待 X 后台处理视频(等按钮 disabled 消失,最多 30 分钟)...")
-            try:
-                page.wait_for_selector(
-                    "[data-testid='tweetButton']:not([disabled]), "
-                    "[data-testid='tweetButtonInline']:not([disabled])",
-                    timeout=1800_000,  # 30 分钟
-                )
-                log("按钮 enabled,X 准备好发送")
-            except Exception:
+            found = False
+            deadline = time.time() + 1800  # 30 分钟
+            while time.time() < deadline:
+                try:
+                    page.wait_for_selector(
+                        "[data-testid='tweetButton']:not([disabled]), "
+                        "[data-testid='tweetButtonInline']:not([disabled])",
+                        timeout=10_000,
+                    )
+                    found = True
+                    break
+                except Exception:
+                    if heartbeat_fn:
+                        heartbeat_fn()
+                    pop.dismiss_all_overlays(page, log)
+
+            if not found:
                 pop.dismiss_all_overlays(page, log)
                 shot, html = pop.snapshot_unknown(
                     page, screenshot_dir, "button_disabled_30min"
@@ -534,25 +608,26 @@ def post_to_twitter(
                     "30 分钟内 Post 按钮仍 disabled,X 可能在审核或拒绝该视频",
                     shot, html,
                 )
+            log("按钮 enabled,X 准备好发送")
 
             # 模拟人类反应延迟 5-15 秒(真人看到按钮亮起也会顿一下再点)
             human_delay_ms = random.randint(5_000, 15_000)
             log(f"模拟人类延迟 {human_delay_ms/1000:.1f} 秒后点发送")
             page.wait_for_timeout(human_delay_ms)
+            if heartbeat_fn:
+                heartbeat_fn()
             page.locator(
                 "[data-testid='tweetButton']:not([disabled]), "
                 "[data-testid='tweetButtonInline']:not([disabled])"
             ).first.click(timeout=10_000)
             log("已点击发送")
 
-            # 等推文真正发出去
-            page.wait_for_timeout(8_000)
-            pop.dismiss_all_overlays(page, log)
-            page.wait_for_timeout(8_000)
-            log("发推完成")
-            page.wait_for_timeout(8_000)
-            pop.dismiss_all_overlays(page, log)
-            page.wait_for_timeout(5_000)
+            # 等推文真正发出去(分段等待,每段喂狗)
+            for delay_ms in (8_000, 8_000, 8_000, 5_000):
+                page.wait_for_timeout(delay_ms)
+                if heartbeat_fn:
+                    heartbeat_fn()
+                pop.dismiss_all_overlays(page, log)
             log("发推完成")
         finally:
             try:

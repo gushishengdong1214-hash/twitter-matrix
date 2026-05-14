@@ -2,9 +2,11 @@ import streamlit as st
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from auth import check_auth
 import database as db
 
 st.set_page_config(page_title="代理库", page_icon="🔌", layout="wide")
+check_auth()
 st.title("🔌 代理库")
 st.caption("静态住宅代理(SOCKS5)。每台 Worker 绑定一个,1:1 不共用。")
 
