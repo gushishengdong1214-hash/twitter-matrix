@@ -65,6 +65,7 @@ def _build_config_payload(worker: dict) -> dict:
         "rest_max_minutes": worker.get("rest_max_minutes", 90),
         "daily_target": worker.get("daily_target", 8),
         "traffic_quota_gb": worker.get("traffic_quota_gb", 1000),
+        "source_site": worker.get("source_site") or "",
     }
 
 
