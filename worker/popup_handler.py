@@ -36,6 +36,12 @@ class PopupRule:
 
 KNOWN_POPUPS: list[PopupRule] = [
     PopupRule(
+        name="mask_overlay",
+        test_selector="[data-testid='mask']",
+        click_selector="[data-testid='mask']",
+        description="X 遮罩层(mask overlay)挡住按钮点击",
+    ),
+    PopupRule(
         name="confirmation_sheet_confirm",
         test_selector="[data-testid='confirmationSheetConfirm']",
         click_selector="[data-testid='confirmationSheetConfirm']",
