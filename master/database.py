@@ -234,6 +234,12 @@ def set_worker_status(wid: int, status: str) -> None:
 
 # ---------- tasks ----------
 
+def get_task(tid: int) -> Optional[dict]:
+    with get_conn() as c:
+        r = c.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        return dict(r) if r else None
+
+
 def list_tasks(worker_id: Optional[int] = None, status: Optional[str] = None, limit: int = 500) -> list[dict]:
     sql = "SELECT t.*, w.nickname AS worker_nickname FROM tasks t JOIN workers w ON t.worker_id = w.id WHERE 1=1"
     args: list = []

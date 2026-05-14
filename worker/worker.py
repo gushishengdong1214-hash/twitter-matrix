@@ -22,6 +22,7 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import popup_handler as pop
 import tweet_engine as eng
@@ -252,6 +253,28 @@ def run_one_task(task: dict, config: dict):
 
     # 任务开始时放宽看门狗阈值(允许长视频下载/处理不超 20 分钟)
     _start_task_watchdog()
+
+    # URL 严格校验:格式合法 + 域名匹配 worker 的 source_site
+    if not (url.startswith("http://") or url.startswith("https://")):
+        log(f"任务 {tid} URL 格式非法,拒绝执行: {url}")
+        update_task_in_file(tid, status="failed", finished_at=_now_str(),
+                            error_message=f"URL 格式非法: {url}")
+        _end_task_watchdog()
+        return
+
+    source_site = (config.get("source_site") or "").strip().lower()
+    if source_site:
+        try:
+            domain = urlparse(url).netloc.lower()
+        except Exception:
+            domain = ""
+        if source_site not in domain:
+            log(f"任务 {tid} URL 域名 {domain} 不匹配本机 source_site={source_site},拒绝执行(分流锁死)")
+            update_task_in_file(tid, status="failed", finished_at=_now_str(),
+                                error_message=f"URL 域名 {domain} 不属于本机 source_site={source_site}")
+            _end_task_watchdog()
+            return
+        log(f"分流校验通过: {domain} 匹配 source_site={source_site}")
 
     # 任务开头强制清理同名残留(防 Bug A:上次任务的不完整文件被复用)
     for p in (video_temp, video_compliant):
