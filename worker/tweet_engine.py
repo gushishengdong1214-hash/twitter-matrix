@@ -29,8 +29,9 @@ DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
 
-# X 视频发布硬指标:140s / 512MB / H.264 + AAC / yuv420p
-TWITTER_DURATION_LIMIT_S = 140
+# X 视频发布硬指标:H.264 + AAC / yuv420p
+# 时长限制放宽到 10 分钟(600s),Twitter Blue 支持更长
+TWITTER_DURATION_LIMIT_S = 600
 TWITTER_SIZE_LIMIT_BYTES = 512 * 1024 * 1024
 TWITTER_TARGET_BITRATE_K = 8000  # 8Mbps,稳在 25Mbps 上限内
 
@@ -419,13 +420,11 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=Non
             shutil.copy(in_path, out_path)
         return True
 
-    # 转码 + 必要时截断到前 140 秒
+    # 转码:不再截断时长,只限制码率和尺寸
     log(f"压制:超标(限制 {TWITTER_DURATION_LIMIT_S}s/512MB),开始转码")
     cmd = [
         ffmpeg, "-y",
         "-i", str(in_path),
-        "-ss", "0",
-        "-t", str(TWITTER_DURATION_LIMIT_S),
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "23",
@@ -475,7 +474,7 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=Non
         return False
 
     new_size = out_path.stat().st_size
-    log(f"压制:完成,输出 {new_size/1024/1024:.1f}MB,截断至 {TWITTER_DURATION_LIMIT_S}s")
+    log(f"压制:完成,输出 {new_size/1024/1024:.1f}MB")
     return True
 
 
@@ -577,6 +576,19 @@ def post_to_twitter(
                 log("没等到 attachments selector,继续")
 
             pop.dismiss_all_overlays(page, log)
+
+            # 等待上传进度条消失:先等附件上传 100% 完成
+            log("等待视频上传进度完成...")
+            try:
+                # X 上传时会显示 progressbar,等它消失(最多 5 分钟)
+                page.wait_for_selector(
+                    "[role='progressbar']",
+                    state="hidden",
+                    timeout=300_000,
+                )
+                log("上传进度条已消失,文件上传完成")
+            except Exception:
+                log("未检测到上传进度条或已提前完成,继续")
 
             # 真正的等待:button 的 disabled 属性消失
             # X 的发推按钮视觉上始终是黑色,但 DOM 里 disabled 真实存在,
