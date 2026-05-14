@@ -617,11 +617,23 @@ def post_to_twitter(
             page.wait_for_timeout(human_delay_ms)
             if heartbeat_fn:
                 heartbeat_fn()
-            page.locator(
-                "[data-testid='tweetButton']:not([disabled]), "
-                "[data-testid='tweetButtonInline']:not([disabled])"
-            ).first.click(timeout=10_000)
-            log("已点击发送")
+            # JS 强制点击,绕过 r-lp0dtai 等遮罩层拦截
+            try:
+                page.evaluate(
+                    "() => {"
+                    "  const btn = document.querySelector('[data-testid=\"tweetButton\"]')"
+                    "    || document.querySelector('[data-testid=\"tweetButtonInline\"]');"
+                    "  if (btn) btn.click();"
+                    "}"
+                )
+                log("JS 强制点击发送成功")
+            except Exception as e:
+                log(f"JS 点击失败,尝试 fallback 到普通 click: {e}")
+                page.locator(
+                    "[data-testid='tweetButton']:not([disabled]), "
+                    "[data-testid='tweetButtonInline']:not([disabled])"
+                ).first.click(timeout=10_000)
+                log("普通 click 发送成功")
 
             # 等推文真正发出去(分段等待,每段喂狗)
             for delay_ms in (8_000, 8_000, 8_000, 5_000):

@@ -42,6 +42,12 @@ KNOWN_POPUPS: list[PopupRule] = [
         description="X 遮罩层(mask overlay)挡住按钮点击",
     ),
     PopupRule(
+        name="r-lp0dtai_overlay",
+        test_selector=".r-lp0dtai",
+        click_selector=".r-lp0dtai",
+        description="X 通用遮罩层 r-lp0dtai 挡住按钮点击",
+    ),
+    PopupRule(
         name="confirmation_sheet_confirm",
         test_selector="[data-testid='confirmationSheetConfirm']",
         click_selector="[data-testid='confirmationSheetConfirm']",
