@@ -10,7 +10,7 @@ db.init_db()
 # 简单密码登录(只在设了 TWMATRIX_UI_PASSWORD 环境变量时启用)
 _PASSWORD = os.getenv("TWMATRIX_UI_PASSWORD", "").strip()
 if _PASSWORD:
-    if not st.session_state.get("authed"):
+    if not (st.session_state.get("logged_in") or st.session_state.get("authed")):
         st.title("🔒 推特矩阵中控")
         with st.form("login"):
             pwd = st.text_input("登录密码", type="password")
