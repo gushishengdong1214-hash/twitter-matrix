@@ -32,7 +32,8 @@ DEFAULT_UA = (
 # X 视频发布硬指标:H.264 + AAC / yuv420p
 # 时长限制放宽到 10 分钟(600s),Twitter Blue 支持更长
 TWITTER_DURATION_LIMIT_S = 600
-TWITTER_SIZE_LIMIT_BYTES = 512 * 1024 * 1024
+# 体积限制放宽到 2GB,Twitter Blue 支持最大 8GB
+TWITTER_SIZE_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 TWITTER_TARGET_BITRATE_K = 8000  # 8Mbps,稳在 25Mbps 上限内
 
 # Chromium 启动参数:WebRTC 屏蔽 + 隐藏自动化痕迹
@@ -230,10 +231,34 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                     log(f"唯一候选: {filtered[0][:120]}")
                     return filtered[0]
 
-                # 多个候选:GET 每个 m3u8,选 #EXTINF segment 数最多的
+                # 多个候选:按分辨率从高到低排序,选最高画质
+                def _resolution_score(u: str) -> int:
+                    """从 URL 提取分辨率分数,越高越好。"""
+                    import re
+                    m = re.search(r"_(\d+)p", u)
+                    if m:
+                        return int(m.group(1))
+                    # 没有分辨率标识的,检查 m3u8 内容中的带宽
+                    return 0
+
+                scored = []
+                for m3u8_url in filtered:
+                    score = _resolution_score(m3u8_url)
+                    scored.append((score, m3u8_url))
+
+                # 按分辨率降序,同分辨率选 segment 多的
+                scored.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_url = scored[0]
+                log(f"候选 m3u8 分辨率排序: {[(s, u.split('/')[-1][:40]) for s, u in scored]}")
+
+                if best_score > 0:
+                    log(f"选最高分辨率 {best_score}p: {best_url[:120]}")
+                    return best_url
+
+                # 无分辨率标识: fallback 到 segment 数最多
                 best = None
                 best_count = -1
-                for m3u8_url in filtered:
+                for _, m3u8_url in scored:
                     try:
                         resp = page.request.get(m3u8_url, timeout=10_000)
                         if not resp.ok:
@@ -390,11 +415,11 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=Non
     if not ffmpeg or not ffprobe:
         size = in_path.stat().st_size
         if size <= TWITTER_SIZE_LIMIT_BYTES:
-            log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 在大小限内,直接采用(无法验证时长)")
+            log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 在大小限内,直接采用")
             if in_path != out_path:
                 shutil.copy(in_path, out_path)
             return True
-        log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 超 512MB,放弃")
+        log(f"压制:未找到 ffmpeg,原视频 {size/1024/1024:.1f}MB 超 {TWITTER_SIZE_LIMIT_BYTES/1024/1024:.0f}MB,放弃")
         return False
 
     # 探测时长 + 尺寸
@@ -413,15 +438,15 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=Non
 
     log(f"压制:原视频 {duration:.1f}s / {size/1024/1024:.1f}MB")
 
-    # 已合规:直接采用
-    if duration <= TWITTER_DURATION_LIMIT_S and size <= TWITTER_SIZE_LIMIT_BYTES:
-        log("压制:已符合 Twitter 标准,直接采用原视频")
+    # 已合规:直接采用(放宽标准:只要编码格式对,时长和大小由 Twitter 自己拦)
+    if size <= TWITTER_SIZE_LIMIT_BYTES:
+        log(f"压制:原视频 {duration:.1f}s/{size/1024/1024:.1f}MB 在体积限内,直接采用")
         if in_path != out_path:
             shutil.copy(in_path, out_path)
         return True
 
     # 转码:不再截断时长,只限制码率和尺寸
-    log(f"压制:超标(限制 {TWITTER_DURATION_LIMIT_S}s/512MB),开始转码")
+    log(f"压制:开始转码(时长={duration:.1f}s,大小={size/1024/1024:.1f}MB)")
     cmd = [
         ffmpeg, "-y",
         "-i", str(in_path),
@@ -459,8 +484,9 @@ def ensure_video_compliance(in_path: Path, out_path: Path, log, heartbeat_fn=Non
             pass
         return False
     except subprocess.CalledProcessError as e:
-        tail = (e.stderr or "")[-500:]
-        log(f"压制:ffmpeg 失败 rc={e.returncode},stderr 末段:{tail}")
+        tail = (e.stderr or "")[-1000:]
+        log(f"压制:ffmpeg 失败 rc={e.returncode}")
+        log(f"压制:ffmpeg stderr 末段:{tail}")
         try:
             out_path.unlink()
         except FileNotFoundError:
