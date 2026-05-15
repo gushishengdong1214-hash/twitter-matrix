@@ -312,6 +312,34 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                         log(f'  - {label} [{kind}] {u.split("/")[-1][:50]}')
 
                 best_height, best_bw, best_url, best_kind = scored[0]
+
+                # 高清推断:如果最高分辨率≤480p,尝试推断更高清晰度的URL
+                # Jable 等站的 m3u8 通常是 /path/video_240p.m3u8,可推断 _1080p/_720p/_480p
+                if best_height <= 480:
+                    log(f"嗅探最高仅 {best_height}p,尝试推断高清变体URL...")
+                    inferred_urls = []
+                    for target_h in [1080, 720, 480]:
+                        if target_h <= best_height:
+                            continue
+                        # 模式1: _240p.m3u8 -> _1080p.m3u8
+                        inferred = re.sub(r"_\d+p(\.m3u8)", f"_{target_h}p\\1", best_url, count=1)
+                        if inferred != best_url:
+                            inferred_urls.append((target_h, inferred))
+                        # 模式2: /240p/ -> /1080p/
+                        inferred2 = best_url.replace(f"/{best_height}p/", f"/{target_h}p/")
+                        if inferred2 != best_url and inferred2 not in [u for _, u in inferred_urls]:
+                            inferred_urls.append((target_h, inferred2))
+
+                    for target_h, inferred_url in inferred_urls:
+                        try:
+                            resp = page.request.head(inferred_url, timeout=10_000)
+                            if resp.ok:
+                                log(f"推断命中 {target_h}p: {inferred_url[:120]}")
+                                return inferred_url
+                        except Exception:
+                            pass
+                    log("推断高清URL均不存在,沿用嗅探结果")
+
                 if best_height > 0:
                     log(f"选最高分辨率 {best_height}p ({best_kind}): {best_url[:120]}")
                     return best_url
