@@ -283,6 +283,14 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                         resp = page.request.get(m3u8_url, timeout=10_000)
                         if resp.ok:
                             text = resp.text()
+                            # 直播流排除:没有 #EXT-X-ENDLIST 的是直播/DVR,不是完整 VOD
+                            if "#EXT-X-ENDLIST" not in text:
+                                log(f"  排除直播流(无 ENDLIST): {m3u8_url.split('/')[-1][:50]}")
+                                continue
+                            # 额外排除已知直播路径模式
+                            if "/b-hls-" in m3u8_url:
+                                log(f"  排除直播路径(/b-hls-): {m3u8_url.split('/')[-1][:50]}")
+                                continue
                             # 判断是 master m3u8 还是 media m3u8
                             if "#EXT-X-STREAM-INF" in text:
                                 info = _parse_m3u8_variant_info(text)
