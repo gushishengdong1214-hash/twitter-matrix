@@ -729,10 +729,10 @@ def post_to_twitter(
             page.locator("input[data-testid='fileInput']").first.set_input_files(str(video_path))
             log(f"已选择视频文件 {video_path}")
 
-            # 等附件占位出现
+            # 等附件占位出现(大视频文件上传慢,放宽到 5 分钟)
             try:
                 page.wait_for_selector(
-                    "[data-testid='attachments']", timeout=120_000
+                    "[data-testid='attachments']", timeout=300_000
                 )
                 log("已附加视频(看到 attachments 容器)")
             except Exception:
@@ -740,14 +740,13 @@ def post_to_twitter(
 
             pop.dismiss_all_overlays(page, log)
 
-            # 等待上传进度条消失:先等附件上传 100% 完成
+            # 等待上传进度条消失:大视频上传极慢,放宽到 10 分钟
             log("等待视频上传进度完成...")
             try:
-                # X 上传时会显示 progressbar,等它消失(最多 5 分钟)
                 page.wait_for_selector(
                     "[role='progressbar']",
                     state="hidden",
-                    timeout=300_000,
+                    timeout=600_000,
                 )
                 log("上传进度条已消失,文件上传完成")
             except Exception:
@@ -757,10 +756,10 @@ def post_to_twitter(
             # X 的发推按钮视觉上始终是黑色,但 DOM 里 disabled 真实存在,
             # disabled 阻止 React 处理 onClick,即使 force click 也不会触发后端。
             # 必须等 X 后台处理完视频(disabled 消失)才能 click。
-            # 改为 10 秒轮询,期间喂狗,防止 30 分钟单阻塞导致看门狗误杀。
-            log("等待 X 后台处理视频(等按钮 disabled 消失,最多 30 分钟)...")
+            # 大视频处理可能超过 30 分钟,放宽到 60 分钟,10 秒轮询喂狗。
+            log("等待 X 后台处理视频(等按钮 disabled 消失,最多 60 分钟)...")
             found = False
-            deadline = time.time() + 1800  # 30 分钟
+            deadline = time.time() + 3600  # 60 分钟
             while time.time() < deadline:
                 try:
                     page.wait_for_selector(
