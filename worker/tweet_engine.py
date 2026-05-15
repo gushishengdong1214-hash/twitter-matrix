@@ -549,6 +549,11 @@ def download_video(
     # 高清链路锁死:下载前打印所有可用分辨率,确保我们能看见最高流
     _list_formats(real_url, ydl_opts, log)
 
+    # yt-dlp 全显:把实际下发的命令参数打印出来,方便核对 URL 和内容是否一致
+    proxy_flag = f"代理={yt_proxy_url}" if yt_proxy_url else "代理=无"
+    log(f"[yt-dlp] 目标 URL={real_url}")
+    log(f"[yt-dlp] 格式={ydl_opts['format']} 输出={out_path} {proxy_flag} 合并格式={ydl_opts.get('merge_output_format','mp4')}")
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([real_url])
