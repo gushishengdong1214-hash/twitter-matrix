@@ -26,8 +26,24 @@ except ImportError:
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# 高清下载专用:更完整的浏览器请求头伪装
+DEFAULT_HEADERS = {
+    "User-Agent": DEFAULT_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 # X 视频发布硬指标:H.264 + AAC / yuv420p
 # 时长限制放宽到 10 分钟(600s),Twitter Blue 支持更长
@@ -200,7 +216,9 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                     page.wait_for_timeout(5000)
                     _hb()
 
-                # 主策略:DOM 里找主 video 元素的 m3u8 src
+                # 主策略:DOM 里读 video 元素的 currentSrc,但不直接返回——
+                # 播放器自适应可能选了低清晰度,把它加入候选池统一排序更保险
+                video_src = None
                 try:
                     video_src = page.evaluate(
                         """() => {
@@ -213,13 +231,16 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                         }"""
                     )
                     if video_src:
-                        log(f"主策略命中: {video_src[:120]}")
-                        return video_src
+                        log(f"主策略读到 video.currentSrc: {video_src[:120]}")
                 except Exception as e:
                     log(f"主策略读 video 元素失败:{e}")
 
-                # 兜底 1:过滤掉已知非主视频模式
+                # 统一候选池:捕获的网络请求 + video 元素读到的 src(去重)
                 unique = list(dict.fromkeys(captured))
+                if video_src and video_src not in unique:
+                    unique.insert(0, video_src)
+
+                # 兜底 1:过滤掉已知非主视频模式
                 filtered = [u for u in unique if not is_excluded(u)]
                 log(f"嗅到 {len(unique)} 个 m3u8,排除后剩 {len(filtered)} 个")
 
@@ -231,55 +252,73 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                     log(f"唯一候选: {filtered[0][:120]}")
                     return filtered[0]
 
-                # 多个候选:按分辨率从高到低排序,选最高画质
-                def _resolution_score(u: str) -> int:
-                    """从 URL 提取分辨率分数,越高越好。"""
-                    import re
+                # 多个候选:解析 master m3u8 中的真实分辨率/带宽,选最高画质
+                import re
+
+                def _resolution_from_url(u: str) -> int:
                     m = re.search(r"_(\d+)p", u)
-                    if m:
-                        return int(m.group(1))
-                    # 没有分辨率标识的,检查 m3u8 内容中的带宽
-                    return 0
+                    return int(m.group(1)) if m else 0
+
+                def _parse_m3u8_variant_info(text: str) -> dict:
+                    """解析 master m3u8,提取最高 variant 的分辨率和带宽。"""
+                    info = {"width": 0, "height": 0, "bandwidth": 0}
+                    for line in text.splitlines():
+                        if line.startswith("#EXT-X-STREAM-INF"):
+                            # BANDWIDTH=...
+                            bm = re.search(r"BANDWIDTH=(\d+)", line)
+                            if bm:
+                                info["bandwidth"] = int(bm.group(1))
+                            # RESOLUTION=1920x1080
+                            rm = re.search(r"RESOLUTION=(\d+)x(\d+)", line)
+                            if rm:
+                                info["width"] = int(rm.group(1))
+                                info["height"] = int(rm.group(2))
+                    return info
 
                 scored = []
                 for m3u8_url in filtered:
-                    score = _resolution_score(m3u8_url)
-                    scored.append((score, m3u8_url))
-
-                # 按分辨率降序,同分辨率选 segment 多的
-                scored.sort(key=lambda x: x[0], reverse=True)
-                best_score, best_url = scored[0]
-                log(f"候选 m3u8 分辨率排序: {[(s, u.split('/')[-1][:40]) for s, u in scored]}")
-
-                if best_score > 0:
-                    log(f"选最高分辨率 {best_score}p: {best_url[:120]}")
-                    return best_url
-
-                # 无分辨率标识: fallback 到 segment 数最多
-                best = None
-                best_count = -1
-                for _, m3u8_url in scored:
+                    url_score = _resolution_from_url(m3u8_url)
+                    # 尝试读取 m3u8 内容获取真实分辨率
                     try:
                         resp = page.request.get(m3u8_url, timeout=10_000)
-                        if not resp.ok:
-                            continue
-                        text = resp.text()
-                        seg_count = text.count("#EXTINF")
-                        if seg_count == 0:
-                            seg_count = max(text.count(".ts"), len(text.splitlines()))
-                        if seg_count > best_count:
-                            best_count = seg_count
-                            best = m3u8_url
+                        if resp.ok:
+                            text = resp.text()
+                            # 判断是 master m3u8 还是 media m3u8
+                            if "#EXT-X-STREAM-INF" in text:
+                                info = _parse_m3u8_variant_info(text)
+                                # master m3u8:用里面最高 variant 的分辨率
+                                height = info["height"] or url_score
+                                bw = info["bandwidth"]
+                                scored.append((height, bw, m3u8_url, "master"))
+                            else:
+                                # media m3u8:segment 数作为质量参考
+                                seg_count = text.count("#EXTINF")
+                                scored.append((url_score, seg_count, m3u8_url, "media"))
+                        else:
+                            scored.append((url_score, 0, m3u8_url, "unknown"))
                     except Exception:
-                        continue
+                        scored.append((url_score, 0, m3u8_url, "unknown"))
 
-                if best:
-                    log(f"选 segment 最多({best_count}): {best[:120]}")
-                    return best
+                # 按分辨率降序,同分辨率选带宽高的
+                scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                log(f"候选 m3u8 分辨率排序(高→低):")
+                for height, bw, u, kind in scored:
+                    label = f"{height}p" if height > 0 else "?p"
+                    if kind == "master":
+                        log(f'  - {label} BW={bw/1000:.0f}k [{kind}] {u.split("/")[-1][:50]}')
+                    elif kind == "media":
+                        log(f'  - {label} segs={bw} [{kind}] {u.split("/")[-1][:50]}')
+                    else:
+                        log(f'  - {label} [{kind}] {u.split("/")[-1][:50]}')
 
-                # 最后兜底
-                log(f"兜底返回第一个: {filtered[0][:120]}")
-                return filtered[0]
+                best_height, best_bw, best_url, best_kind = scored[0]
+                if best_height > 0:
+                    log(f"选最高分辨率 {best_height}p ({best_kind}): {best_url[:120]}")
+                    return best_url
+
+                # 无分辨率信息:兜底选带宽/segment 最多的
+                log(f"兜底返回最优候选 ({best_kind}): {best_url[:120]}")
+                return best_url
             finally:
                 try:
                     browser.close()
@@ -288,6 +327,64 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
     except Exception as e:
         log(f"m3u8 嗅探失败:{e}")
     return None
+
+
+def _list_formats(url: str, ydl_opts: dict, log) -> list[dict]:
+    """用 yt-dlp 提取所有可用格式,打印分辨率列表供 debug。返回格式列表。"""
+    formats = []
+    try:
+        with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                log("格式探测:未获取到视频信息")
+                return formats
+            formats = info.get("formats") or []
+            if not formats:
+                log("格式探测:无可用格式")
+                return formats
+
+            # 过滤出有视频流的格式,按分辨率排序
+            video_formats = []
+            for f in formats:
+                vcodec = f.get("vcodec", "none")
+                if vcodec == "none" or not vcodec:
+                    continue
+                height = f.get("height") or 0
+                width = f.get("width") or 0
+                fps = f.get("fps") or 0
+                tbr = f.get("tbr") or 0  # 总码率 kbps
+                abr = f.get("abr") or 0
+                ext = f.get("ext", "")
+                fmt_id = f.get("format_id", "")
+                video_formats.append({
+                    "id": fmt_id,
+                    "ext": ext,
+                    "width": width,
+                    "height": height,
+                    "fps": fps,
+                    "tbr": tbr,
+                    "abr": abr,
+                    "vcodec": vcodec,
+                })
+
+            # 去重:同分辨率只保留码率最高的
+            best_by_res = {}
+            for f in video_formats:
+                key = f["height"]
+                if key not in best_by_res or f["tbr"] > best_by_res[key]["tbr"]:
+                    best_by_res[key] = f
+
+            sorted_fmts = sorted(best_by_res.values(), key=lambda x: x["height"], reverse=True)
+            lines = [f'{f["height"]}p ({f["width"]}x{f["height"]}) {f["ext"]} {f["tbr"]:.0f}kbps fps={f["fps"]}' for f in sorted_fmts]
+            log(f'格式探测:发现 {len(sorted_fmts)} 个视频分辨率(去重后):')
+            for line in lines:
+                log(f'  - {line}')
+            if sorted_fmts:
+                best = sorted_fmts[0]
+                log(f'最高画质: {best["height"]}p / {best["tbr"]:.0f}kbps / {best["ext"]}')
+    except Exception as e:
+        log(f"格式探测失败(非致命):{e}")
+    return formats
 
 
 def _make_progress_hook(log, heartbeat_fn=None):
@@ -358,7 +455,8 @@ def download_video(
 
     ydl_opts = {
         "outtmpl": str(out_path),
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        # 强制最高画质:不限制容器格式,让 yt-dlp 选 bestvideo+bestaudio 后合并为 mp4
+        "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
         "quiet": True,  # 关闭 yt-dlp 自带输出,用 progress_hooks 接管
         "no_warnings": True,
@@ -369,7 +467,7 @@ def download_video(
         "concurrent_fragment_downloads": 15,
         "progress_hooks": [_make_progress_hook(log, heartbeat_fn)],
         "http_headers": {
-            "User-Agent": user_agent,
+            **DEFAULT_HEADERS,
             "Referer": url,
         },
     }
@@ -386,6 +484,9 @@ def download_video(
             pass
     if yt_proxy_url:
         ydl_opts["proxy"] = yt_proxy_url
+
+    # 高清链路锁死:下载前打印所有可用分辨率,确保我们能看见最高流
+    _list_formats(real_url, ydl_opts, log)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
