@@ -313,35 +313,56 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
 
                 best_height, best_bw, best_url, best_kind = scored[0]
 
-                # 高清推断:如果最高分辨率≤480p,尝试推断更高清晰度的URL
-                # Jable 等站的 m3u8 通常是 /path/video_240p.m3u8,可推断 _1080p/_720p/_480p
-                if best_height <= 480:
-                    log(f"嗅探最高仅 {best_height}p,尝试推断高清变体URL...")
-                    inferred_urls = []
-                    for target_h in [1080, 720, 480]:
-                        if target_h <= best_height:
-                            continue
-                        # 模式1: _240p.m3u8 -> _1080p.m3u8
-                        inferred = re.sub(r"_\d+p(\.m3u8)", f"_{target_h}p\\1", best_url, count=1)
-                        if inferred != best_url:
-                            inferred_urls.append((target_h, inferred))
-                        # 模式2: /240p/ -> /1080p/
-                        inferred2 = best_url.replace(f"/{best_height}p/", f"/{target_h}p/")
-                        if inferred2 != best_url and inferred2 not in [u for _, u in inferred_urls]:
-                            inferred_urls.append((target_h, inferred2))
-
-                    for target_h, inferred_url in inferred_urls:
-                        try:
-                            resp = page.request.head(inferred_url, timeout=10_000)
-                            if resp.ok:
-                                log(f"推断命中 {target_h}p: {inferred_url[:120]}")
-                                return inferred_url
-                        except Exception:
-                            pass
-                    log("推断高清URL均不存在,沿用嗅探结果")
+                # 直接采用候选池排序后第一名 —— 不做 URL 推断
+                # (推断曾把"_240p.m3u8"替换为"_720p.m3u8",但该路径常对应另一支视频源,
+                #  导致拉回错误的长片/正片,例如 2 小时 1.9GB。回归"只信探测到的"。)
+                def _est_size_mb(m3u8_u: str, bw_bps: int) -> Optional[float]:
+                    """快速从 m3u8(media 或 master)估算文件大小 MB。无法估算返回 None。"""
+                    try:
+                        r = page.request.get(m3u8_u, timeout=8_000)
+                        if not r.ok:
+                            return None
+                        txt = r.text()
+                        # master:跟到带宽最高的子流
+                        if "#EXT-X-STREAM-INF" in txt:
+                            from urllib.parse import urljoin
+                            lines = txt.splitlines()
+                            top = None  # (bw, sub_url)
+                            for idx, ln in enumerate(lines):
+                                if not ln.startswith("#EXT-X-STREAM-INF"):
+                                    continue
+                                bm = re.search(r"BANDWIDTH=(\d+)", ln)
+                                cand_bw = int(bm.group(1)) if bm else 0
+                                for j in range(idx + 1, len(lines)):
+                                    s = lines[j].strip()
+                                    if s and not s.startswith("#"):
+                                        if top is None or cand_bw > top[0]:
+                                            top = (cand_bw, s)
+                                        break
+                            if not top:
+                                return None
+                            sub_bw, sub_path = top
+                            sub_url = sub_path if sub_path.startswith("http") else urljoin(m3u8_u, sub_path)
+                            r2 = page.request.get(sub_url, timeout=8_000)
+                            if not r2.ok:
+                                return None
+                            txt = r2.text()
+                            bw_bps = sub_bw or bw_bps
+                        # media:求和 #EXTINF 时长
+                        durs = [float(m.group(1)) for m in re.finditer(r"#EXTINF:([\d.]+)", txt)]
+                        if not durs or not bw_bps:
+                            return None
+                        total_s = sum(durs)
+                        return (bw_bps * total_s) / 8 / (1024 * 1024)
+                    except Exception:
+                        return None
 
                 if best_height > 0:
-                    log(f"选最高分辨率 {best_height}p ({best_kind}): {best_url[:120]}")
+                    est_mb = _est_size_mb(best_url, best_bw)
+                    size_str = f"{est_mb:.0f}MB" if est_mb else "?MB"
+                    warn = "  ⚠️ 体积偏大,如是短视频说明嗅到了错的流" if est_mb and est_mb > 500 else ""
+                    log(f"🎬 锁定下载:{best_height}p / BW={best_bw/1000:.0f}k / 预计 {size_str} ({best_kind}){warn}")
+                    log(f"  URL: {best_url[:120]}")
                     return best_url
 
                 # 无分辨率信息:兜底选带宽/segment 最多的
