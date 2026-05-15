@@ -358,8 +358,16 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
 
 
 def _list_formats(url: str, ydl_opts: dict, log) -> list[dict]:
-    """用 yt-dlp 提取所有可用格式,打印分辨率列表供 debug。返回格式列表。"""
+    """用 yt-dlp 提取所有可用格式,打印分辨率列表供 debug。返回格式列表。
+
+    注意:m3u8 URL 跳过探测,因为 yt-dlp 的 extract_info 在处理某些 m3u8 时会
+    卡住(下载 segment 探测耗时过长),而 master m3u8 的 variant 信息已在
+    _sniff_m3u8 阶段打印过了。
+    """
     formats = []
+    if ".m3u8" in url:
+        log("格式探测:URL 为 m3u8,跳过 yt-dlp extract_info(避免卡死),依赖嗅探阶段的分辨率日志")
+        return formats
     try:
         with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True, "no_warnings": True}) as ydl:
             info = ydl.extract_info(url, download=False)
