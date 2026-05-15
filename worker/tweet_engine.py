@@ -809,13 +809,54 @@ def post_to_twitter(
                 ).first.click(timeout=10_000)
                 log("普通 click 发送成功")
 
-            # 等推文真正发出去(分段等待,每段喂狗)
-            for delay_ms in (8_000, 8_000, 8_000, 5_000):
-                page.wait_for_timeout(delay_ms)
+            # 等推文真正发出去——检测成功反馈,不是盲等
+            log("点击已触发,等待 X 反馈成功提示...")
+            tweet_sent = False
+            check_deadline = time.time() + 30  # 30 秒内必须看到成功反馈
+            while time.time() < check_deadline:
+                try:
+                    # 检测1: "Your post was sent" / "Your tweet was sent" toast
+                    toast_selectors = [
+                        "div[role='alert']",
+                        "[data-testid='toast']",
+                        "[data-testid='toastContainer']",
+                    ]
+                    for sel in toast_selectors:
+                        try:
+                            toast = page.locator(sel).first
+                            if toast.is_visible(timeout=500):
+                                text = toast.inner_text(timeout=500).lower()
+                                if "sent" in text or "已发布" in text or "posted" in text:
+                                    log(f"检测到成功提示: {text[:80]}")
+                                    tweet_sent = True
+                                    break
+                        except Exception:
+                            pass
+                    if tweet_sent:
+                        break
+
+                    # 检测2: URL 离开 compose/tweet 页面(跳转到了时间线)
+                    current_url = page.url
+                    if "compose/tweet" not in current_url:
+                        log(f"页面已跳转,当前 URL: {current_url[:100]}")
+                        tweet_sent = True
+                        break
+                except Exception:
+                    pass
+
                 if heartbeat_fn:
                     heartbeat_fn()
                 pop.dismiss_all_overlays(page, log)
-            log("发推完成")
+                page.wait_for_timeout(3_000)
+
+            if not tweet_sent:
+                log("警告:未检测到发推成功反馈(toast 或 URL 跳转),可能发送失败")
+                shot, html = pop.snapshot_unknown(page, screenshot_dir, "tweet_no_feedback")
+                raise pop.UnknownPopupError(
+                    "点击发送后未检测到成功反馈(无 toast/无 URL 跳转),推文可能未发出",
+                    shot, html,
+                )
+            log("发推完成(已验证)")
         finally:
             try:
                 browser.close()
