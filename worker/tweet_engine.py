@@ -358,10 +358,14 @@ def _sniff_m3u8(url: str, pw_proxy: Optional[dict], user_agent: str, log,
                         return None
 
                 if best_height > 0:
-                    est_mb = _est_size_mb(best_url, best_bw)
-                    size_str = f"{est_mb:.0f}MB" if est_mb else "?MB"
-                    warn = "  ⚠️ 体积偏大,如是短视频说明嗅到了错的流" if est_mb and est_mb > 500 else ""
-                    log(f"🎬 锁定下载:{best_height}p / BW={best_bw/1000:.0f}k / 预计 {size_str} ({best_kind}){warn}")
+                    if best_kind == "master":
+                        est_mb = _est_size_mb(best_url, best_bw)
+                        size_str = f"{est_mb:.0f}MB" if est_mb else "?MB"
+                        warn = "  ⚠️ 体积偏大,如是短视频说明嗅到了错的流" if est_mb and est_mb > 500 else ""
+                        log(f"🎬 锁定下载:{best_height}p / BW={best_bw/1000:.0f}k / 预计 {size_str} ({best_kind}){warn}")
+                    else:
+                        # media 类型时 best_bw 是 segment 数,不是带宽,不能算大小
+                        log(f"🎬 锁定下载:{best_height}p / segs={best_bw} / 大小待下载后确认 ({best_kind})")
                     log(f"  URL: {best_url[:120]}")
                     return best_url
 
